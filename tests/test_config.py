@@ -11,7 +11,7 @@ def test_defaults():
     cfg = load_config(None)
     assert cfg.checkpoint == "Aratako/Irodori-TTS-v4.1-Small"
     assert cfg.llm.model == "qwen3.5:4b-q8_0"
-    assert cfg.split.max_chars == 80
+    assert cfg.split.max_chars == 40
     assert list(cfg.emotion_emoji) == EMOTIONS
     assert len(EMOTIONS) == 10
     assert all(len(v) == 3 for v in cfg.emotion_emoji.values())

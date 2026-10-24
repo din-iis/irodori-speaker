@@ -68,7 +68,7 @@ class LLMConfig:
 @dataclass
 class SplitConfig:
     chapter_regex: str = DEFAULT_CHAPTER_REGEX
-    max_chars: int = 80
+    max_chars: int = 40
 
 
 @dataclass

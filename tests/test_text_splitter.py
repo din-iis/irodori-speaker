@@ -78,3 +78,17 @@ def test_split_long_has_no_punctuation_only_fragment():
 def test_explicit_ruby_does_not_cross_newline():
     text = "窓の外に縦線｜が見えた。\n翌朝、漢字《かんじ》を読んだ。"
     assert clean_text(text) == "窓の外に縦線｜が見えた。\n翌朝、かんじを読んだ。"
+
+
+def test_default_config_splits_long_sentence_at_commas():
+    # 長い文は生成の後半で参照音声の声から離れるため、既定では 40 文字以内に分けて合成する
+    from irodori_speaker.config import load_config
+
+    cfg = load_config(None)
+    sentence = "あ" * 15 + "、" + "い" * 15 + "、" + "う" * 15 + "、" + "え" * 15 + "。"
+    chapters = build_chapters(sentence, cfg.split.chapter_regex, cfg.split.max_chars)
+    parts = [s.text for c in chapters for p in c.paragraphs for s in p]
+    assert len(parts) > 1
+    assert all(len(p) <= 40 for p in parts)
+    assert "".join(parts) == sentence
+    assert all(p.endswith(("、", "。")) for p in parts)  # 読点・句点の位置で分ける

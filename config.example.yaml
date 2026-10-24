@@ -51,7 +51,7 @@ llm:
 
 split:
   # chapter_regex: '^\s*第.+?[章話節].*$'
-  max_chars: 80
+  max_chars: 40          # 長い文は後半で参照音声の声から離れるため、読点の位置で 40 文字以内に分けて合成する
 
 silence:   # 秒
   sentence: 0.25
