@@ -55,7 +55,7 @@ uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
 
 - 文のキャッシュ（`synth.cache_key`）: `text`（絵文字込み）・参照音声の潜在キー・checkpoint・`sampling` の各値のハッシュ。`device` / `precision` は含めない。設定を変えると自動で作り直しになり、中断後の再実行は続きから再開する。
 - 潜在キャッシュ（`out/.voices/<latent_key>.pt`）: 参照音声を DACVAE で一度だけエンコードして保存し、以後は `ref_latent` で渡す。キーは参照音声の中身・`codec_repo`・`ref_normalize_db`・`max_ref_seconds`（`null` のときは checkpoint）。
-- 章 WAV は `.sig` に署名（本文・サンプリング・無音・checkpoint・潜在キー）を持ち、全体 WAV は全章が揃って署名が一致するときだけ作る。止めたとき・失敗時は古い全体 WAV を消す。
+- 章 WAV は `.sig` に署名（本文・サンプリング・無音・checkpoint・潜在キー）を持ち、全体 WAV は全章が揃って署名が一致するときだけ作る。章 WAV と全体 WAV の書き込みは一時ファイル経由で、失敗時は .sig が消えて stale 扱いになる。止めたとき・失敗時は古い全体 WAV を消す。
 
 `webui.py`（Gradio、`-c` / `--host` / `--port`、既定 `127.0.0.1:7860`）は別の入口で、`Engine` が (checkpoint, device, precision, voice) の組ごとに `Synthesizer` を作り直し、変わると runtime を読み直す。生成ハンドラは generator で状態メッセージを yield する。
 

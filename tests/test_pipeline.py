@@ -606,3 +606,39 @@ def test_cli_run_no_emotion(tmp_path, monkeypatch):
     out = tmp_path / "out" / "sample_novel"
     assert len(list((out / "chapters").glob("*.wav"))) == 2
     assert (out / "sample_novel_full.wav").exists()
+
+
+def test_failed_chapter_write_removes_sig_and_makes_chapter_stale(book, monkeypatch):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    ch1 = pipeline._chapter_path(out, 0, titles)
+    assert pipeline._sig_path(ch1).exists()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "write_chapter", boom)
+    with pytest.raises(OSError):
+        pipeline.synthesize_book(rows, titles, cfg, out, synth, chapters={1}, force=True)
+    assert not pipeline._sig_path(ch1).exists()
+    monkeypatch.undo()
+
+    res = pipeline.synthesize_book(rows, titles, cfg, out, synth, chapters={2})
+    assert 1 in res.stale_chapters
+    assert res.full_path is None
+
+
+def test_failed_concat_removes_old_full_wav(book, monkeypatch):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    first = pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    assert first.full_path is not None and first.full_path.exists()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pipeline, "concat_wavs", boom)
+    with pytest.raises(OSError):
+        pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    assert not first.full_path.exists()

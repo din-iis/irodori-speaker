@@ -257,6 +257,8 @@ def synthesize_book(
                 if progress:
                     progress(done, total, f"章 {idx + 1} / 文 {done}/{total}")
             ch_path = _chapter_path(out_dir, idx, titles)
+            # 書き込み失敗時に以前の署名が残って壊れた章が一致扱いにならないよう、先に消す
+            _sig_path(ch_path).unlink(missing_ok=True)
             write_chapter(ch_path, clips, cfg.silence)
             _sig_path(ch_path).write_text(chapter_signature(_sorted_rows(by_chapter[idx]), cfg, synth), encoding="utf-8")
             chapter_files.append(ch_path)
@@ -286,7 +288,11 @@ def synthesize_book(
     full: Path | None = None
     if all_paths and not missing and not stale:
         full = out_dir / f"{out_dir.name}_full.wav"
-        concat_wavs(all_paths, full)
+        try:
+            concat_wavs(all_paths, full)
+        except Exception:
+            _remove_old_full(out_dir)
+            raise
     else:
         _remove_old_full(out_dir)
     return BookResult(chapter_files, full, stopped=False, stale_chapters=stale)
