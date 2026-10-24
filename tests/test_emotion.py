@@ -621,3 +621,51 @@ def test_server_startup_timeout_stops_even_when_unload_false(monkeypatch, clock)
         with LLMServer(LLMConfig(server_command=["srv"], server_start_timeout=2, unload=False)):
             pass
     assert proc.terminated
+
+
+# ---- レビュー指摘の修正 3 ----
+
+
+def test_server_interrupt_during_wait_stops_process(monkeypatch):
+    proc = FakeProc()
+    monkeypatch.setattr(emotion.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(emotion.time, "sleep", lambda s: None)
+    state = {"n": 0}
+
+    def fake_healthy(self, timeout=5.0):
+        state["n"] += 1
+        if state["n"] == 1:
+            return False  # 起動前の確認
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(LLMServer, "_healthy", fake_healthy)
+    with pytest.raises(KeyboardInterrupt):
+        with LLMServer(LLMConfig(server_command=["srv"], unload=False)):
+            pass
+    assert proc.terminated
+
+
+def test_annotator_skips_broken_cache_lines_and_recovers(tmp_path, monkeypatch, capsys):
+    cache = tmp_path / "a.jsonl"
+    good = {"hash": paragraph_hash("qwen3.5:4b-q8_0", [["ふざけるな！"]]), "annotations": [[{"emotion": "angry", "intensity": 2}]]}
+    cache.write_text(
+        json.dumps(good, ensure_ascii=False) + "\n" + '{"hash": "abc", "annotat', encoding="utf-8"
+    )
+    ann = LLMAnnotator(LLMConfig(), cache)
+    assert capsys.readouterr().out.count("[emotion]") == 1
+    monkeypatch.setattr(ann, "_chat", lambda p: (_ for _ in ()).throw(AssertionError("再問い合わせ")))
+    assert ann.annotate(segs("ふざけるな！")) == [[Annotation("angry", 2)]]
+
+    monkeypatch.setattr(ann, "_chat", lambda p: {"segments": [{"s": 0, "c": 0, "emotion": "sad", "intensity": 3}]})
+    ann.annotate(segs("もう駄目だ。"))
+    capsys.readouterr()
+    ann2 = LLMAnnotator(LLMConfig(), cache)
+    assert capsys.readouterr().out.count("[emotion]") == 1  # 壊れた行は残っているが警告は 1 回
+    assert len(ann2.cache) == 2
+    assert ann2.cache[paragraph_hash("qwen3.5:4b-q8_0", [["もう駄目だ。"]])] == [[{"emotion": "sad", "intensity": 3}]]
+
+
+def test_annotator_skips_rows_missing_keys(tmp_path):
+    cache = tmp_path / "a.jsonl"
+    cache.write_text('{"hash": "x"}\n[]\n{"annotations": []}\n', encoding="utf-8")
+    assert LLMAnnotator(LLMConfig(), cache).cache == {}

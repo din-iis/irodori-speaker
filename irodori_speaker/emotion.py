@@ -203,10 +203,25 @@ class LLMAnnotator:
         self.cache: dict[str, list[list[dict]]] = {}
         self._lock = threading.Lock()
         if cache_path.exists():
+            broken = 0
             for line in cache_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
+                if not line.strip():
+                    continue
+                try:
                     row = json.loads(line)
                     self.cache[row["hash"]] = row["annotations"]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    broken += 1
+            if broken:
+                print(f"[emotion] キャッシュの壊れた行を {broken} 件読み飛ばしました: {cache_path}")
+
+    def _needs_newline(self) -> bool:
+        try:
+            with self.cache_path.open("rb") as f:
+                f.seek(-1, 2)
+                return f.read(1) != b"\n"
+        except OSError:  # 無い・空のファイル
+            return False
 
     def _chat(self, user_prompt: str) -> object:
         if self.cfg.api == "ollama":
@@ -305,8 +320,12 @@ class LLMAnnotator:
         with self._lock:
             self.cache[key] = rows
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            row = json.dumps({"hash": key, "annotations": rows}, ensure_ascii=False) + "\n"
+            # 末尾が途中で切れていると次の行まで壊れるので、改行で終わらせてから追記する
+            if self._needs_newline():
+                row = "\n" + row
             with self.cache_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"hash": key, "annotations": rows}, ensure_ascii=False) + "\n")
+                f.write(row)
         return anns
 
     def annotate_many(
@@ -376,14 +395,18 @@ class LLMServer:
         self._proc = subprocess.Popen(
             self.cfg.server_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        deadline = time.monotonic() + self.cfg.server_start_timeout
-        while (remaining := deadline - time.monotonic()) > 0:
-            time.sleep(min(1.0, remaining))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if self._healthy(timeout=min(5.0, remaining)):
-                return self
+        try:
+            deadline = time.monotonic() + self.cfg.server_start_timeout
+            while (remaining := deadline - time.monotonic()) > 0:
+                time.sleep(min(1.0, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if self._healthy(timeout=min(5.0, remaining)):
+                    return self
+        except BaseException:  # Ctrl+C でも起動した子プロセスを残さない
+            self._stop()
+            raise
         self._stop()
         raise RuntimeError(
             f"LLM サーバーが {self.cfg.server_start_timeout} 秒以内に起動しませんでした"
