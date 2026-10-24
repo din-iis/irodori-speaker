@@ -705,3 +705,27 @@ def test_annotate_falls_back_on_non_object_response(tmp_path, monkeypatch, api, 
     assert ann.annotate(segs("あ、い。")) == [[Annotation(), Annotation()]]
     assert ann.cache == {}
     assert not cache.exists()
+
+
+# ---- レビュー指摘の修正 5 ----
+
+
+def test_ollama_posts_send_authorization(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_post(url, **kw):
+        seen.append((url, kw.get("headers")))
+        return FakeResp({"message": {"content": "{}"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    ann = LLMAnnotator(LLMConfig(api_key="k"), tmp_path / "a.jsonl")
+    ann._chat("u")
+    ann.unload()
+    assert [h for _, h in seen] == [{"Authorization": "Bearer k"}] * 2
+    assert [u.rsplit("/", 2)[-2:] for u, _ in seen] == [["api", "chat"], ["api", "generate"]]
+
+
+def test_unload_warns_on_http_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(requests, "post", lambda url, **kw: FakeResp(status=500))
+    LLMAnnotator(LLMConfig(), tmp_path / "a.jsonl").unload()  # 例外は出ない
+    assert "[emotion]" in capsys.readouterr().out

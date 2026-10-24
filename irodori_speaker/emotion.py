@@ -246,6 +246,7 @@ class LLMAnnotator:
     def _chat_ollama(self, user_prompt: str) -> object:
         resp = requests.post(
             f"{self.cfg.base_url.rstrip('/')}/api/chat",
+            headers=_auth_headers(self.cfg),
             json={
                 "model": self.cfg.model,
                 "messages": self._messages(user_prompt),
@@ -358,11 +359,13 @@ class LLMAnnotator:
         if not self.cfg.unload or self.cfg.api != "ollama":
             return
         try:
-            requests.post(
+            resp = requests.post(
                 f"{self.cfg.base_url.rstrip('/')}/api/generate",
+                headers=_auth_headers(self.cfg),
                 json={"model": self.cfg.model, "keep_alive": 0},
                 timeout=self.cfg.timeout,
             )
+            resp.raise_for_status()
         except requests.RequestException as e:
             print(f"[emotion] モデルの解放に失敗しました: {e}")
 
