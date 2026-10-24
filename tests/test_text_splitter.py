@@ -92,3 +92,18 @@ def test_default_config_splits_long_sentence_at_commas():
     assert all(len(p) <= 40 for p in parts)
     assert "".join(parts) == sentence
     assert all(p.endswith(("、", "。")) for p in parts)  # 読点・句点の位置で分ける
+
+
+def test_文字数での分割は絵文字の連なりを切らない():
+    from irodori_speaker.text_splitter import split_sentences
+
+    for emoji in ("😠😠", "😮‍💨", "⏸️", "🌬️"):
+        text = "あ" * 39 + emoji + "い" * 20
+        parts = split_sentences(text, max_chars=40)
+        assert len(parts) >= 2
+        assert "".join(parts) == text
+        assert any(emoji in p for p in parts)
+        assert not any(p.startswith(("‍", "️")) for p in parts)
+        assert not any(p.endswith("‍") for p in parts)
+        for p in parts:
+            assert emoji[0] not in p or emoji in p  # 連なりの片割れだけの断片が無い

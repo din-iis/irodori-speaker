@@ -509,7 +509,7 @@ def test_carry_emoji_は_ZWJ_を含む絵文字を1つの連なりとして引�
 def test_carry_emoji_は異体字セレクタを絵文字の一部にする():
     from irodori_speaker.webui import carry_emoji
 
-    assert carry_emoji([["☺️あ。", "い。"]]) == [["☺️あ。", "☺️い。"]]
+    assert carry_emoji([["⏸️あ。", "い。"]]) == [["⏸️あ。", "⏸️い。"]]
 
 
 def test_carry_emoji_は絵文字より前の文には付けない():
@@ -524,3 +524,10 @@ def test_generate_は先頭の絵文字を分けた文に引き継ぐ(monkeypatc
     _run(fns["generate"]("😠😠" + LONG, None, None, None, "narrator", "", 3.0, 3.0, 1.0, "7"))
     assert len(fake.calls) >= 2
     assert all(t.startswith("😠😠") for t, _ in fake.calls)
+
+
+def test_carry_emoji_は_Irodori_以外の記号を引き継がない():
+    from irodori_speaker.webui import carry_emoji
+
+    src = [["室温は20℃です。", "次は5㎏です。", "♪あ。", "★い。"]]
+    assert carry_emoji(src) == src
