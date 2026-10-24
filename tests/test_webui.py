@@ -326,3 +326,129 @@ def replace_output(cfg, tmp_path):
     from dataclasses import replace
 
     return replace(cfg, output_dir=str(tmp_path / "out"))
+
+
+# -- 試聴の分割合成 --
+
+LONG = "あ" * 15 + "、" + "い" * 15 + "、" + "う" * 15 + "。"  # 48 文字で 1 文
+
+
+def test_split_preview_text_は長い文を_max_chars_以内に分ける():
+    from irodori_speaker.webui import split_preview_text
+
+    paragraphs = split_preview_text(LONG, 40)
+    assert len(paragraphs) == 1 and len(paragraphs[0]) >= 2
+    assert all(len(s) <= 40 for s in paragraphs[0])
+    assert "".join(paragraphs[0]) == LONG
+
+
+def test_split_preview_text_は改行で段落を分け空行を無視する():
+    from irodori_speaker.webui import split_preview_text
+
+    assert split_preview_text("あ。い。\n\n  \nう。", 40) == [["あ。", "い。"], ["う。"]]
+
+
+def test_split_preview_text_は短い文を1要素のままにする():
+    from irodori_speaker.webui import split_preview_text
+
+    assert split_preview_text("こんにちは。", 40) == [["こんにちは。"]]
+
+
+def test_join_audio_は文の長さと無音の合計になる():
+    import numpy as np
+
+    from irodori_speaker.webui import join_audio
+
+    a, b, c = (np.ones(100, dtype=np.float32) for _ in range(3))
+    out = join_audio([[a, b], [c]], 1000, 0.01, 0.05)
+    assert out.dtype == np.float32 and out.ndim == 1
+    assert len(out) == 300 + 10 + 50
+    assert out[100:110].sum() == 0 and out[210:260].sum() == 0
+    assert out[:100].min() == 1 and out[260:].min() == 1
+
+
+def test_join_audio_は1文なら無音を足さない():
+    import numpy as np
+
+    from irodori_speaker.webui import join_audio
+
+    a = np.ones(100, dtype=np.float32)
+    assert len(join_audio([[a]], 1000, 0.25, 0.6)) == 100
+
+
+class _FakeSynth:
+    def __init__(self, sr=1000):
+        self.calls = []
+        self.sr = sr
+
+    def generate_once(self, text, **overrides):
+        import numpy as np
+
+        self.calls.append((text, overrides))
+        return self.sr, np.ones(10, dtype=np.float32), [f"w{len(self.calls)}"]
+
+
+def _preview_handlers(monkeypatch, tmp_path, fake):
+    fns, _ = _handlers(monkeypatch, tmp_path)
+    from irodori_speaker import webui
+
+    monkeypatch.setattr(webui.Engine, "is_loaded", lambda self, key: True)
+    monkeypatch.setattr(webui.Engine, "load", lambda self, *a, **k: fake)
+    return fns
+
+
+def _run(gen):
+    outs = list(gen)
+    return outs
+
+
+def test_generate_は長い文を分けて合成する(monkeypatch, tmp_path):
+    fake = _FakeSynth()
+    fns = _preview_handlers(monkeypatch, tmp_path, fake)
+    outs = _run(fns["generate"](LONG, None, None, None, "narrator", "", 3.0, 3.0, 1.0, "7"))
+    assert len(fake.calls) >= 2
+    assert "".join(t for t, _ in fake.calls) == LONG
+    assert all(len(t) <= 40 for t, _ in fake.calls)
+    assert all(o["seed"] == 7 for _, o in fake.calls)
+    assert any("(1/" in str(o[1]) for o in outs)
+    (sr, audio), status = outs[-1]
+    assert sr == 1000 and len(audio) > 10 * len(fake.calls)
+    assert f"{len(fake.calls)} 文に分けて合成" in status
+    assert "警告" in status
+
+
+def test_generate_は短い文を1回で合成する(monkeypatch, tmp_path):
+    fake = _FakeSynth()
+    fns = _preview_handlers(monkeypatch, tmp_path, fake)
+    outs = _run(fns["generate"]("こんにちは。", None, None, None, "narrator", "", 3.0, 3.0, 1.0, "7"))
+    assert [t for t, _ in fake.calls] == ["こんにちは。"]
+    assert "文に分けて" not in outs[-1][1]
+
+
+def test_generate_はサンプリングレートが違えば失敗する(monkeypatch, tmp_path):
+    fake = _FakeSynth()
+    orig = fake.generate_once
+
+    def varying(text, **kw):
+        fake.sr += 1
+        return orig(text, **kw)
+
+    fake.generate_once = varying
+    fns = _preview_handlers(monkeypatch, tmp_path, fake)
+    with pytest.raises(Exception, match="サンプリングレート"):
+        _run(fns["generate"](LONG, None, None, None, "narrator", "", 3.0, 3.0, 1.0, "7"))
+
+
+def test_compare_emotions_は各文の先頭に絵文字を付ける(monkeypatch, tmp_path):
+    fake = _FakeSynth()
+    fns = _preview_handlers(monkeypatch, tmp_path, fake)
+    from irodori_speaker.config import EMOTIONS
+
+    _run(fns["compare_emotions"](LONG, None, None, None, "narrator", "", 3.0, 3.0, 1.0, "7", 3))
+    per = len(fake.calls) // len(EMOTIONS)
+    assert per >= 2 and per * len(EMOTIONS) == len(fake.calls)
+    texts = [t for t, _ in fake.calls[:per]]
+    # 感情ごとに、全ての文の先頭に同じ絵文字（または何も無し）が付く
+    prefixes = {t[: min(t.index(c) for c in "あいう" if c in t)] for t in texts}
+    assert len(prefixes) == 1
+    assert all(t.lstrip("".join(prefixes)).startswith(("あ", "い", "う")) for t in texts)

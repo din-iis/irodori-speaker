@@ -124,6 +124,52 @@ def emoji_prefixed(text: str, emoji: str) -> str:
     return text[:pos] + emoji + text[pos:]
 
 
+def split_preview_text(text: str, max_chars: int) -> list[list[str]]:
+    """試聴の本文を、小説生成と同じ規則で段落ごとの文のリストに分ける。"""
+    from .text_splitter import split_paragraphs, split_sentences
+
+    paragraphs = (split_sentences(para, max_chars) for para in split_paragraphs(text))
+    return [sentences for sentences in paragraphs if sentences]
+
+
+def join_audio(pieces, sr: int, sentence_gap: float, paragraph_gap: float):
+    """段落ごとの文の音声を、文の間・段落の間に無音を挟んで 1 本にする。先頭と末尾には足さない。"""
+    import numpy as np
+
+    parts = []
+    for paragraph in pieces:
+        for s_idx, audio in enumerate(paragraph):
+            if parts:
+                gap = sentence_gap if s_idx else paragraph_gap
+                parts.append(np.zeros(int(round(gap * sr)), dtype=np.float32))
+            parts.append(np.asarray(audio, dtype=np.float32).reshape(-1))
+    if not parts:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(parts)
+
+
+def synthesize_split(synth, paragraphs, overrides, sentence_gap, paragraph_gap, prefix=None):
+    """分けた文を 1 文ずつ合成して結合する。文ごとに (i, n) を yield し、(sr, audio, warnings) を返す。
+
+    prefix は文ごとに本文へ手を入れる関数（総当たり生成の絵文字用）。
+    """
+    n = sum(len(p) for p in paragraphs)
+    rows, warnings, srs, done = [], [], [], 0
+    for paragraph in paragraphs:
+        row = []
+        for sentence in paragraph:
+            done += 1
+            yield done, n
+            sr, audio, warns = synth.generate_once(prefix(sentence) if prefix else sentence, **overrides)
+            srs.append(sr)
+            row.append(audio)
+            warnings.extend(warns)
+        rows.append(row)
+    if len(set(srs)) != 1:
+        raise ValueError(f"文ごとのサンプリングレートが一致しません: {sorted(set(srs))}")
+    return srs[0], join_audio(rows, srs[0], sentence_gap, paragraph_gap), warnings
+
+
 def add_voice(src, voice_id: str, voices_dir) -> Path:
     """アップロードされた音声を voices/<id><拡張子> にコピーする。"""
     voice_id = (voice_id or "").strip()
@@ -422,12 +468,22 @@ def build_app(cfg: Config):
         seed_value, overrides = sampling_args(steps, cfg_text, cfg_speaker, duration, seed)
         try:
             synth = yield from _with_status(ensure_loaded(key, preview_dir))
+            paragraphs = split_preview_text(text, cfg.split.max_chars)
+            n = sum(len(p) for p in paragraphs)
             yield gr.update(), "🎙 生成中…"
             t0 = time.perf_counter()
-            sr, audio, warnings = synth.generate_once(text, **overrides)
+            work = synthesize_split(synth, paragraphs, overrides, cfg.silence.sentence, cfg.silence.paragraph)
+            try:
+                while True:
+                    i, _ = next(work)
+                    if n >= 2:
+                        yield gr.update(), f"🎙 生成中… ({i}/{n})"
+            except StopIteration as stop:
+                sr, audio, warnings = stop.value
         except Exception as e:
             raise fail("生成に失敗しました", e) from e
-        yield (sr, audio), f"✅ 生成完了 seed={seed_value}・{time.perf_counter() - t0:.1f}秒 {warn_note(warnings)}"
+        split_note = f"・{n} 文に分けて合成" if n >= 2 else ""
+        yield (sr, audio), f"✅ 生成完了 seed={seed_value}・{time.perf_counter() - t0:.1f}秒{split_note} {warn_note(warnings)}"
 
     def _with_status(step):
         """ensure_loaded の状態を (gr.update(), msg) として流し、Synthesizer を返す。"""
@@ -450,6 +506,7 @@ def build_app(cfg: Config):
         seed_value, overrides = sampling_args(steps, cfg_text, cfg_speaker, duration, seed)
         n = len(EMOTIONS)
         results = [gr.update()] * n
+        paragraphs = split_preview_text(text, cfg.split.max_chars)
         try:
             step = ensure_loaded(key, preview_dir)
             try:
@@ -462,7 +519,17 @@ def build_app(cfg: Config):
                 msg = f"🎙 生成中… ({i + 1}/{n}) {emotion} {emoji}"
                 progress((i, n), desc=msg)
                 yield [*results, msg]
-                sr, audio, _warnings = synth.generate_once(emoji_prefixed(text, emoji), **overrides)
+                work = synthesize_split(
+                    synth, paragraphs, overrides, cfg.silence.sentence, cfg.silence.paragraph,
+                    prefix=lambda piece, emoji=emoji: emoji_prefixed(piece, emoji),
+                )
+                try:
+                    while True:
+                        j, total = next(work)
+                        if total >= 2:
+                            yield [*results, f"{msg} [{j}/{total}]"]
+                except StopIteration as stop:
+                    sr, audio, _warnings = stop.value
                 results[i] = gr.update(value=(sr, audio), label=f"{emotion}: {emoji or '(絵文字なし)'}")
         except Exception as e:
             raise fail("生成に失敗しました", e) from e
