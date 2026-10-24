@@ -70,7 +70,7 @@ uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
 - `torch` と `irodori_tts` は `synth.py` / `webui.py` 内（と `cli._make_synthesizer`）で遅延 import している。トップレベルに移すと Mac でのテストと `script` が壊れる。`emotion.py` も `pipeline.annotate_chapters` の中で遅延 import している（`--no-emotion` を動かすため）。TTS の import に失敗したら `cli.py` が案内を出して終了コード 2 で止まる。
 - **8GB の GPU では LLM と TTS を同時に載せない**。`run` は台本 → LLM 解放 → 音声化の順。`load_runtime` はモデルを読み込む前に `check_vram`（`min_free_vram_gb`）で空きを確認し、足りなければ LLM サーバーの停止を案内する。モデルを切り替えるときは旧 runtime を先に解放してから確認する（上流は新旧を同時に持つため）。
 - LLM の `ollama` は OpenAI 互換ではなく**ネイティブ `/api/chat`** を使う。`think: false` と `format`（JSON Schema）、`keep_alive: 0` が確実に効くため（OpenAI 互換経由では思考モードの無効化が届かない報告がある）。`openai` は `response_format`（400 なら `json_object`、さらに 400 なら余分なキーを外す）と `chat_template_kwargs` / `reasoning_effort` を送り、`<think>` は除去する。
-- **絵文字の配置（句の先頭、連発しない、文の先頭は必ず置く）は本ツールの仮定**。上流の `EMOJI_ANNOTATIONS.md` は配置ルールを定めていない。変更時は WebUI の「感情プリセット総当たり」で効きを確認する。強度 1 は絵文字なし、強度 3 は同じ絵文字の繰り返し。😭 のような非言語音の絵文字は発話の前に泣き声が入ることがあるので、既定では sad の強度 3 だけに使う。
+- **絵文字の配置（句の先頭、連発しない、文の先頭は必ず置く）は本ツールの仮定**。上流の `EMOJI_ANNOTATIONS.md` は配置ルールを定めていない。変更時は WebUI の「総当たり生成」で効きを確認する。強度 1 は絵文字なし、強度 3 は同じ絵文字の繰り返し。😭 のような非言語音の絵文字は発話の前に泣き声が入ることがあるので、既定では sad の強度 3 だけに使う。
 - 長文は不安定になり、`sampling.max_seconds`（30 秒）で切り詰められるので、文単位で合成して結合する設計を崩さない。切り詰めは `res.messages` の `info: predicted duration …` を `synth.collect_warnings` が読んで `warnings.log` に記録する。
 - 参照音声（`ref_latent`）に対応しないチェックポイント（VoiceDesign 等）は対象外で、`load_runtime` が ValueError にする。
 - 出力には上流の仕様で SilentCipher の透かしが入る。他人の声を同意なく複製しないこと（モデルカードの倫理規定）。
