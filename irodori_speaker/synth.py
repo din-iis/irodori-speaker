@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+from .config import Config
+from .voices import voice_key as _voice_key
+
+_DURATION_RE = re.compile(
+    r"info: predicted duration frames=(\d+), scale=([\d.]+), using_frames=(\d+)"
+)
+
+
+def _sha1(payload) -> str:
+    return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def check_vram(cfg: Config) -> None:
+    if not cfg.device.startswith("cuda") or cfg.min_free_vram_gb <= 0:
+        return
+    import torch  # GPU マシンでのみ必要なので遅延 import
+
+    if not torch.cuda.is_available():
+        return
+    free, _total = torch.cuda.mem_get_info()
+    free_gb = free / 2**30
+    if free_gb < cfg.min_free_vram_gb:
+        raise RuntimeError(
+            f"空き VRAM が {free_gb:.1f} GB しかありません（必要 {cfg.min_free_vram_gb} GB）。"
+            "LLM サーバー（Ollama なら `ollama stop <model>`）を停止してから再実行してください"
+        )
+
+
+def latent_key(
+    voice_key: str, codec_repo: str, normalize_db: float | None, max_ref_seconds: float | None
+) -> str:
+    return _sha1([voice_key, codec_repo, normalize_db, max_ref_seconds])
+
+
+def cache_key(cfg: Config, text: str, latent_key: str) -> str:
+    s = cfg.sampling
+    return _sha1(
+        {
+            "text": text,
+            "latent": latent_key,
+            "checkpoint": cfg.checkpoint,
+            "num_steps": s.num_steps,
+            "t_schedule_mode": s.t_schedule_mode,
+            "sway_coeff": s.sway_coeff,
+            "cfg_scale_text": s.cfg_scale_text,
+            "cfg_scale_speaker": s.cfg_scale_speaker,
+            "duration_scale": s.duration_scale,
+            "max_seconds": s.max_seconds,
+            "seed": s.seed,
+        }
+    )
+
+
+def resolve_checkpoint(checkpoint: str) -> str:
+    local = Path(checkpoint).expanduser()
+    if local.exists():
+        return str(local)
+    from irodori_tts.inference_runtime import download_hf_checkpoint
+
+    return download_hf_checkpoint(checkpoint)
+
+
+def load_runtime(cfg: Config):
+    from irodori_tts.inference_runtime import RuntimeKey, get_cached_runtime
+
+    key = RuntimeKey(
+        checkpoint=resolve_checkpoint(cfg.checkpoint),
+        model_device=cfg.device,
+        codec_device=cfg.device,
+        model_precision=cfg.precision,
+        codec_precision=cfg.precision,
+        codec_repo=cfg.codec_repo,
+    )
+    runtime, _loaded_now = get_cached_runtime(key)
+    if not runtime.model_cfg.use_speaker_condition_resolved:
+        raise ValueError("このチェックポイントは参照音声に対応していません")
+    return runtime
+
+
+def _load_clip(path: Path):
+    """(C, T) の tensor とサンプリングレートを返す。torchaudio が失敗したら soundfile で読む。"""
+    import torch
+    import torchaudio
+
+    try:
+        return torchaudio.load(str(path))
+    except RuntimeError:
+        data, sr = sf.read(str(path), dtype="float32", always_2d=True)  # (T, C)
+        return torch.from_numpy(data.T.copy()), sr
+
+
+def encode_voice(runtime, paths: list[Path], cache_dir: Path, cfg: Config) -> Path:
+    max_ref = (
+        cfg.max_ref_seconds if cfg.max_ref_seconds is not None else float(runtime.default_max_ref_seconds)
+    )
+    key = latent_key(_voice_key(paths), cfg.codec_repo, cfg.ref_normalize_db, cfg.max_ref_seconds)
+    cache_dir = Path(cache_dir)
+    path = cache_dir / f"{key}.pt"
+    if path.exists():
+        return path
+    import torch
+
+    print(f"[synth] 参照音声 {len(paths)} クリップを潜在表現に変換します")
+    pieces = []
+    for p in paths:
+        wav, sr = _load_clip(Path(p))
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if len(paths) == 1 and max_ref > 0 and wav.shape[1] > max_ref * sr:
+            wav = wav[:, : int(max_ref * sr)]
+        pieces.append(
+            runtime.codec.encode_waveform(
+                wav, sample_rate=sr, normalize_db=cfg.ref_normalize_db, ensure_max=True
+            ).cpu()
+        )
+    latent = torch.cat(pieces, dim=1)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(latent[0], tmp)
+    tmp.replace(path)
+    return path
+
+
+def collect_warnings(messages: list[str]) -> list[str]:
+    warnings = []
+    for m in messages:
+        if not m.startswith("info:"):
+            warnings.append(m)
+            continue
+        hit = _DURATION_RE.fullmatch(m.strip())
+        if hit:
+            frames, scale, using = int(hit[1]), float(hit[2]), int(hit[3])
+            if round(frames * scale) > using:
+                warnings.append(f"max_seconds で切り詰め: 予測 {frames} フレーム × {hit[2]} > {using}")
+    return warnings
+
+
+def _sampling_request(**kwargs):
+    from irodori_tts.inference_runtime import SamplingRequest
+
+    return SamplingRequest(**kwargs)
+
+
+def _save_wav(path, audio, sample_rate) -> None:
+    from irodori_tts.inference_runtime import save_wav
+
+    save_wav(path, audio, sample_rate)
+
+
+_SAMPLING_FIELDS = (
+    "num_steps", "t_schedule_mode", "sway_coeff", "cfg_scale_text",
+    "cfg_scale_speaker", "duration_scale", "max_seconds", "seed",
+)
+
+
+class Synthesizer:
+    def __init__(
+        self,
+        cfg: Config,
+        segments_dir: Path,
+        voice_paths: list[Path],
+        latent_cache_dir: Path,
+        warnings_path: Path | None = None,
+    ) -> None:
+        self.cfg = cfg
+        self.segments_dir = Path(segments_dir)
+        self.segments_dir.mkdir(parents=True, exist_ok=True)
+        self.voice_paths = [Path(p) for p in voice_paths]
+        self.latent_cache_dir = Path(latent_cache_dir)
+        self.warnings_path = Path(warnings_path) if warnings_path else None
+        self.last_warnings: list[str] = []
+        self.latent_key = latent_key(
+            _voice_key(self.voice_paths), cfg.codec_repo, cfg.ref_normalize_db, cfg.max_ref_seconds
+        )
+        self._runtime = None
+        self._latent_path: Path | None = None
+        self._count = 0
+
+    @property
+    def runtime(self):
+        if self._runtime is None:
+            check_vram(self.cfg)
+            self._runtime = load_runtime(self.cfg)
+        return self._runtime
+
+    @property
+    def latent_path(self) -> Path:
+        if self._latent_path is None:
+            self._latent_path = encode_voice(
+                self.runtime, self.voice_paths, self.latent_cache_dir, self.cfg
+            )
+        return self._latent_path
+
+    def _request(self, text: str, **overrides):
+        s = self.cfg.sampling
+        params = {f: getattr(s, f) for f in _SAMPLING_FIELDS}
+        params.update(overrides)
+        return _sampling_request(
+            text=text,
+            ref_latent=str(self.latent_path),
+            max_ref_seconds=self.cfg.max_ref_seconds,
+            **params,
+        )
+
+    def synthesize(self, text: str, force: bool = False) -> Path:
+        key = cache_key(self.cfg, text, self.latent_key)
+        path = self.segments_dir / f"{key}.wav"
+        if path.exists() and not force:
+            return path
+        res = self.runtime.synthesize(self._request(text))
+        tmp = path.with_name(f"{key}.tmp.wav")
+        _save_wav(tmp, res.audio, res.sample_rate)
+        tmp.replace(path)
+        self.last_warnings = collect_warnings(list(res.messages))
+        for w in self.last_warnings:
+            print(f"[synth] 警告: {w}")
+        if self.last_warnings and self.warnings_path:
+            self.warnings_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.warnings_path, "a", encoding="utf-8") as f:
+                for w in self.last_warnings:
+                    f.write(f"{key}\t{text}\t{w}\n")
+        self._count += 1
+        interval = self.cfg.empty_cache_interval
+        if interval > 0 and self._count % interval == 0 and self.cfg.device.startswith("cuda"):
+            import torch
+
+            torch.cuda.empty_cache()
+        return path
+
+    def generate_once(self, text: str, **overrides) -> tuple[int, np.ndarray, list[str]]:
+        unknown = set(overrides) - set(_SAMPLING_FIELDS)
+        if unknown:
+            raise TypeError(f"generate_once: 不明な引数 {sorted(unknown)}")
+        res = self.runtime.synthesize(self._request(text, **overrides))
+        audio = np.asarray(res.audio.detach().cpu().float().numpy(), dtype=np.float32).reshape(-1)
+        return int(res.sample_rate), audio, collect_warnings(list(res.messages))
