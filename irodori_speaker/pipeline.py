@@ -244,21 +244,26 @@ def synthesize_book(
     total = sum(len(rs) for _, rs in targets)
     done = 0
     chapter_files: list[Path] = []
-    for idx, chapter_rows in targets:
-        clips: list[Clip] = []
-        for r in chapter_rows:
-            if should_stop and should_stop():
-                _remove_old_full(out_dir)
-                return BookResult(chapter_files, None, stopped=True)
-            path = synth.synthesize(spoken_text(r), force=force)
-            clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"])))
-            done += 1
-            if progress:
-                progress(done, total, f"章 {idx + 1} / 文 {done}/{total}")
-        ch_path = _chapter_path(out_dir, idx, titles)
-        write_chapter(ch_path, clips, cfg.silence)
-        _sig_path(ch_path).write_text(chapter_signature(_sorted_rows(by_chapter[idx]), cfg, synth), encoding="utf-8")
-        chapter_files.append(ch_path)
+    try:
+        for idx, chapter_rows in targets:
+            clips: list[Clip] = []
+            for r in _sorted_rows(chapter_rows):
+                if should_stop and should_stop():
+                    _remove_old_full(out_dir)
+                    return BookResult(chapter_files, None, stopped=True)
+                path = synth.synthesize(spoken_text(r), force=force)
+                clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"])))
+                done += 1
+                if progress:
+                    progress(done, total, f"章 {idx + 1} / 文 {done}/{total}")
+            ch_path = _chapter_path(out_dir, idx, titles)
+            write_chapter(ch_path, clips, cfg.silence)
+            _sig_path(ch_path).write_text(chapter_signature(_sorted_rows(by_chapter[idx]), cfg, synth), encoding="utf-8")
+            chapter_files.append(ch_path)
+    except Exception:
+        # 台本と一致しない古い通しを残さない
+        _remove_old_full(out_dir)
+        raise
 
     # 全章の WAV があり、署名が現在の台本と一致するときだけ通しを作る
     all_paths: list[Path] = []

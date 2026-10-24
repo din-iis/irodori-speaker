@@ -466,6 +466,31 @@ def test_stale_full_wav_is_removed_on_stop(book):
     assert res.stopped and not first.full_path.exists()
 
 
+def test_rows_are_synthesized_in_para_seg_order(book):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    pipeline.synthesize_book(list(reversed(rows)), titles, cfg, out, synth)
+    expected = [r["text"] for r in rows if int(r["chapter"]) == 0] + [
+        r["text"] for r in rows if int(r["chapter"]) == 1
+    ]
+    assert synth.texts == expected
+
+
+def test_old_full_wav_removed_when_synthesis_raises(book):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    first = pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    assert first.full_path.exists()
+
+    class Failing(FakeSynth):
+        def synthesize(self, text, force=False):
+            raise RuntimeError("空き VRAM が足りません")
+
+    with pytest.raises(RuntimeError):
+        pipeline.synthesize_book(rows, titles, cfg, out, Failing(out / "segments"), chapters={1})
+    assert not first.full_path.exists()
+
+
 def test_synthesize_book_should_stop(book):
     cfg, out, titles, rows = book
     calls = {"n": 0}
