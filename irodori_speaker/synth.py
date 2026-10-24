@@ -76,18 +76,32 @@ def resolve_checkpoint(checkpoint: str) -> str:
     return download_hf_checkpoint(checkpoint)
 
 
-def load_runtime(cfg: Config):
-    from irodori_tts.inference_runtime import RuntimeKey, get_cached_runtime
+_LOADED_KEY = None  # 直近に get_cached_runtime へ渡した RuntimeKey（上流の runtime が載っている目印）
 
-    key = RuntimeKey(
-        checkpoint=resolve_checkpoint(cfg.checkpoint),
+
+def _runtime_key(cfg: Config, checkpoint: str | None = None):
+    from irodori_tts.inference_runtime import RuntimeKey
+
+    return RuntimeKey(
+        checkpoint=checkpoint if checkpoint is not None else resolve_checkpoint(cfg.checkpoint),
         model_device=cfg.device,
         codec_device=cfg.device,
         model_precision=cfg.precision,
         codec_precision=cfg.precision,
         codec_repo=cfg.codec_repo,
     )
+
+
+def load_runtime(cfg: Config, checkpoint: str | None = None):
+    """上流のキャッシュから runtime を得る。キーが変わるときだけ VRAM を確認する。"""
+    global _LOADED_KEY
+    from irodori_tts.inference_runtime import get_cached_runtime
+
+    key = _runtime_key(cfg, checkpoint)
+    if key != _LOADED_KEY:
+        check_vram(cfg)
     runtime, _loaded_now = get_cached_runtime(key)
+    _LOADED_KEY = key
     if not runtime.model_cfg.use_speaker_condition_resolved:
         raise ValueError("このチェックポイントは参照音声に対応していません")
     return runtime
@@ -189,16 +203,16 @@ class Synthesizer:
         self.warnings_path = Path(warnings_path) if warnings_path else None
         self.last_warnings: list[str] = []
         self.latent_key = latent_key_for(cfg, _voice_key(self.voice_paths))
-        self._runtime = None
+        self._checkpoint: str | None = None
         self._latent_path: Path | None = None
         self._count = 0
 
     @property
     def runtime(self):
-        if self._runtime is None:
-            check_vram(self.cfg)
-            self._runtime = load_runtime(self.cfg)
-        return self._runtime
+        # 上流は別キーで呼ばれると旧 runtime を unload するので、インスタンスには保持しない
+        if self._checkpoint is None:
+            self._checkpoint = resolve_checkpoint(self.cfg.checkpoint)
+        return load_runtime(self.cfg, self._checkpoint)
 
     @property
     def latent_path(self) -> Path:

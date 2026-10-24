@@ -268,3 +268,78 @@ def test_cache_hit_clears_last_warnings(make_synth):
     assert s.last_warnings == ["bad thing"]
     s.synthesize("hi")
     assert s.last_warnings == []
+
+
+@pytest.fixture
+def fake_upstream(monkeypatch, tmp_path):
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class RuntimeKey:
+        checkpoint: str
+        model_device: str
+        codec_device: str
+        model_precision: str
+        codec_precision: str
+        codec_repo: str
+
+    cache = {}
+    mod = types.ModuleType("irodori_tts.inference_runtime")
+    mod.RuntimeKey = RuntimeKey
+
+    def get_cached_runtime(key):
+        if key not in cache:
+            cache.clear()  # 上流は key が変わると旧 runtime を unload する
+            cache[key] = types.SimpleNamespace(
+                key=key, model_cfg=types.SimpleNamespace(use_speaker_condition_resolved=True)
+            )
+        return cache[key], True
+
+    mod.get_cached_runtime = get_cached_runtime
+    monkeypatch.setitem(sys.modules, "irodori_tts", types.ModuleType("irodori_tts"))
+    monkeypatch.setitem(sys.modules, "irodori_tts.inference_runtime", mod)
+    monkeypatch.setattr(synth, "_LOADED_KEY", None, raising=False)
+    vram_calls = []
+    monkeypatch.setattr(synth, "check_vram", lambda cfg: vram_calls.append(cfg.checkpoint))
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    return types.SimpleNamespace(vram_calls=vram_calls, ckpt=str(ckpt), tmp=tmp_path)
+
+
+def _real_synth(fake, checkpoint=None, name="a"):
+    voice = fake.tmp / "v.wav"
+    voice.write_bytes(b"abc")
+    cfg = Config(device="cpu", checkpoint=checkpoint or fake.ckpt)
+    return Synthesizer(cfg, fake.tmp / f"seg{name}", [voice], fake.tmp / "lat")
+
+
+def test_second_synthesizer_with_same_key_skips_vram_check(fake_upstream, monkeypatch):
+    first = _real_synth(fake_upstream, name="1")
+    first.runtime
+
+    def boom(cfg):
+        raise RuntimeError("VRAM 不足")
+
+    monkeypatch.setattr(synth, "check_vram", boom)
+    second = _real_synth(fake_upstream, name="2")
+    assert second.runtime is first.runtime
+
+
+def test_runtime_follows_upstream_cache_after_switch(fake_upstream):
+    other = fake_upstream.tmp / "ckpt2"
+    other.mkdir()
+    first = _real_synth(fake_upstream, name="1")
+    old = first.runtime
+    _real_synth(fake_upstream, checkpoint=str(other), name="2").runtime
+    again = first.runtime
+    assert again is not old
+    assert again.key.checkpoint == fake_upstream.ckpt
+
+
+def test_vram_checked_when_key_changes(fake_upstream):
+    other = fake_upstream.tmp / "ckpt2"
+    other.mkdir()
+    _real_synth(fake_upstream, name="1").runtime
+    assert fake_upstream.vram_calls == [fake_upstream.ckpt]
+    _real_synth(fake_upstream, checkpoint=str(other), name="2").runtime
+    assert fake_upstream.vram_calls == [fake_upstream.ckpt, str(other)]
