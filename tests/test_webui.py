@@ -452,3 +452,75 @@ def test_compare_emotions_は各文の先頭に絵文字を付ける(monkeypatch
     prefixes = {t[: min(t.index(c) for c in "あいう" if c in t)] for t in texts}
     assert len(prefixes) == 1
     assert all(t.lstrip("".join(prefixes)).startswith(("あ", "い", "う")) for t in texts)
+
+
+# -- 分けた文への絵文字の引き継ぎ --
+
+
+def test_carry_emoji_は先頭の絵文字を後続の文に引き継ぐ():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😠😠あ。", "い。", "う。"]]) == [["😠😠あ。", "😠😠い。", "😠😠う。"]]
+
+
+def test_carry_emoji_は段落をまたいで引き継ぐ():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😠あ。"], ["い。"]]) == [["😠あ。"], ["😠い。"]]
+
+
+def test_carry_emoji_は最後に現れた連なりを引き継ぐ():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😠あ。", "い😊う。", "え。"]]) == [["😠あ。", "😠い😊う。", "😊え。"]]
+
+
+def test_carry_emoji_は文頭の別の絵文字を尊重する():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😠あ。", "😊い。", "う。"]]) == [["😠あ。", "😊い。", "😊う。"]]
+
+
+def test_carry_emoji_は括弧の直後に付ける():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😠あ。", "「い。」"]]) == [["😠あ。", "「😠い。」"]]
+
+
+def test_carry_emoji_は括弧の直後の絵文字を文頭の絵文字とみなす():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😠あ。", "「😊い。」", "う。"]]) == [["😠あ。", "「😊い。」", "😊う。"]]
+
+
+def test_carry_emoji_は絵文字が無ければ入力のまま():
+    from irodori_speaker.webui import carry_emoji
+
+    src = [["あ。", "〈い〉。"], ["「う」、…"]]
+    assert carry_emoji(src) == src
+
+
+def test_carry_emoji_は_ZWJ_を含む絵文字を1つの連なりとして引き継ぐ():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["😮‍💨あ。", "い。"]]) == [["😮‍💨あ。", "😮‍💨い。"]]
+
+
+def test_carry_emoji_は異体字セレクタを絵文字の一部にする():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["☺️あ。", "い。"]]) == [["☺️あ。", "☺️い。"]]
+
+
+def test_carry_emoji_は絵文字より前の文には付けない():
+    from irodori_speaker.webui import carry_emoji
+
+    assert carry_emoji([["あ。", "😠い。", "う。"]]) == [["あ。", "😠い。", "😠う。"]]
+
+
+def test_generate_は先頭の絵文字を分けた文に引き継ぐ(monkeypatch, tmp_path):
+    fake = _FakeSynth()
+    fns = _preview_handlers(monkeypatch, tmp_path, fake)
+    _run(fns["generate"]("😠😠" + LONG, None, None, None, "narrator", "", 3.0, 3.0, 1.0, "7"))
+    assert len(fake.calls) >= 2
+    assert all(t.startswith("😠😠") for t, _ in fake.calls)

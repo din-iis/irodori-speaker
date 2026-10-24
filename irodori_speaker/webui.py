@@ -170,6 +170,62 @@ def synthesize_split(synth, paragraphs, overrides, sentence_gap, paragraph_gap, 
     return srs[0], join_audio(rows, srs[0], sentence_gap, paragraph_gap), warnings
 
 
+_ZWJ = "\u200d"
+_VARIATION_SELECTORS = "\ufe0e\ufe0f"
+
+
+def _emoji_runs(text: str) -> list[tuple[int, int]]:
+    """text 中の絵文字の連なり（start, end）を前から順に返す。カテゴリ So を絵文字とみなす。"""
+    import unicodedata
+
+    runs: list[tuple[int, int]] = []
+    start = None
+    prev_emoji = False
+    for i, ch in enumerate(text):
+        if unicodedata.category(ch) == "So":
+            is_part = True
+        elif ch in _VARIATION_SELECTORS or ch == _ZWJ:
+            is_part = prev_emoji
+        else:
+            is_part = False
+        if is_part:
+            if start is None:
+                start = i
+        elif start is not None:
+            runs.append((start, i))
+            start = None
+        prev_emoji = is_part
+    if start is not None:
+        runs.append((start, len(text)))
+    return runs
+
+
+def carry_emoji(paragraphs: list[list[str]]) -> list[list[str]]:
+    """絵文字で始まらない文の先頭に、直前までに最後に現れた絵文字の連なりを付ける。
+
+    文ごとに合成すると 2 文目以降は感情の指定が切れるため、台本作成と同じく文頭に必ず置く。
+    """
+    from .emotion import OPEN_BRACKETS
+
+    last = ""
+    result = []
+    for paragraph in paragraphs:
+        row = []
+        for sentence in paragraph:
+            runs = _emoji_runs(sentence)
+            head = 1 if sentence and sentence[0] in OPEN_BRACKETS else 0
+            if last and not (runs and runs[0][0] == head):
+                sentence_out = emoji_prefixed(sentence, last)
+            else:
+                sentence_out = sentence
+            row.append(sentence_out)
+            out_runs = _emoji_runs(sentence_out)
+            if out_runs:
+                last = sentence_out[slice(*out_runs[-1])]
+        result.append(row)
+    return result
+
+
 def add_voice(src, voice_id: str, voices_dir) -> Path:
     """アップロードされた音声を voices/<id><拡張子> にコピーする。"""
     voice_id = (voice_id or "").strip()
@@ -468,7 +524,7 @@ def build_app(cfg: Config):
         seed_value, overrides = sampling_args(steps, cfg_text, cfg_speaker, duration, seed)
         try:
             synth = yield from _with_status(ensure_loaded(key, preview_dir))
-            paragraphs = split_preview_text(text, cfg.split.max_chars)
+            paragraphs = carry_emoji(split_preview_text(text, cfg.split.max_chars))
             n = sum(len(p) for p in paragraphs)
             yield gr.update(), "🎙 生成中…"
             t0 = time.perf_counter()
