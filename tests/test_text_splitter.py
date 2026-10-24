@@ -73,3 +73,8 @@ def test_split_long_has_no_punctuation_only_fragment():
     assert "".join(parts) == sentence
     for p in parts:
         assert p.strip("」』）)】。！？!?…、,，  ") != ""
+
+
+def test_explicit_ruby_does_not_cross_newline():
+    text = "窓の外に縦線｜が見えた。\n翌朝、漢字《かんじ》を読んだ。"
+    assert clean_text(text) == "窓の外に縦線｜が見えた。\n翌朝、かんじを読んだ。"

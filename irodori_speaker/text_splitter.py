@@ -9,7 +9,7 @@ CLOSE_BRACKETS = "」』）)】"
 SENTENCE_END = "。！？!?"
 DIALOGUE_OPEN = "「『"
 
-_RUBY_EXPLICIT = re.compile(r"[|｜]([^《|｜]+)《([^》]+)》")
+_RUBY_EXPLICIT = re.compile(r"[|｜]([^《|｜\n]+)《([^》]+)》")
 _RUBY_KANJI = re.compile(r"([一-龥々〆ヶ]+)《([^》]+)》")
 _AOZORA_NOTE = re.compile(r"［＃[^］]*］")
 
