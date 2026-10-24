@@ -52,5 +52,7 @@ def concat_wavs(paths: list[Path], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with sf.SoundFile(out_path, "w", samplerate=sr, channels=1, subtype="PCM_16") as out:
         for p in paths:
+            if sf.info(p).samplerate != sr:
+                raise ValueError(f"サンプリングレートが一致しません: {p}")
             for block in sf.blocks(p, blocksize=sr * 30, dtype="float32"):
                 out.write(block)

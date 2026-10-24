@@ -57,3 +57,19 @@ def test_build_chapters_kinds():
     assert any(s.kind == "dialogue" and s.text.startswith("「おはよう") for s in first)
     assert any("あじさい" in s.text for s in first)
     assert chapters[1].idx == 1
+
+
+def test_long_dialogue_keeps_kind_for_all_fragments():
+    text = "「" + "あ" * 50 + "。" + "い" * 50 + "。」"
+    chapters = build_chapters(text, DEFAULT_CHAPTER_REGEX, max_chars=80)
+    segs = [s for c in chapters for p in c.paragraphs for s in p]
+    assert len(segs) > 1
+    assert {s.kind for s in segs} == {"dialogue"}
+
+
+def test_split_long_has_no_punctuation_only_fragment():
+    sentence = "「" + "あ" * 78 + "。」"
+    parts = split_sentences(sentence, max_chars=80)
+    assert "".join(parts) == sentence
+    for p in parts:
+        assert p.strip("」』）)】。！？!?…、,，  ") != ""

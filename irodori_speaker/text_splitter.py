@@ -73,7 +73,14 @@ def split_paragraphs(body: str) -> list[str]:
 
 
 def split_sentences(paragraph: str, max_chars: int = 120) -> list[str]:
-    """。！？の後で文を区切る。括弧の内側では区切らず、長すぎる文だけ再分割する。"""
+    return [s for s, _ in split_sentences_with_kind(paragraph, max_chars)]
+
+
+def split_sentences_with_kind(paragraph: str, max_chars: int = 120) -> list[tuple[str, str]]:
+    """。！？の後で文を区切る。括弧の内側では区切らず、長すぎる文だけ再分割する。
+
+    kind は再分割前の文で決め、再分割した断片すべてに引き継ぐ。
+    """
     sentences: list[str] = []
     buf: list[str] = []
     depth = 0
@@ -103,16 +110,42 @@ def split_sentences(paragraph: str, max_chars: int = 120) -> list[str]:
     if buf:
         sentences.append("".join(buf))
 
-    result: list[str] = []
+    result: list[tuple[str, str]] = []
     for s in sentences:
         s = s.strip()
         if not s:
             continue
-        result.extend(_split_long(s, max_chars))
+        kind = classify(s)
+        result.extend((part, kind) for part in _split_long(s, max_chars))
     return result
 
 
+_NO_SPEECH = set(CLOSE_BRACKETS + SENTENCE_END + "…、,，") | set(" \t　")
+
+
+def _merge_unspoken(parts: list[str]) -> list[str]:
+    """閉じ括弧・句読点・空白だけの断片は読み上げ本文を持たないので隣に併合する。"""
+    merged: list[str] = []
+    carry = ""
+    for p in parts:
+        if all(ch in _NO_SPEECH for ch in p):
+            if merged:
+                merged[-1] += p
+            else:
+                carry += p
+        else:
+            merged.append(carry + p)
+            carry = ""
+    if carry:
+        merged.append(carry)
+    return merged
+
+
 def _split_long(sentence: str, max_chars: int) -> list[str]:
+    return _merge_unspoken(_split_long_raw(sentence, max_chars))
+
+
+def _split_long_raw(sentence: str, max_chars: int) -> list[str]:
     if len(sentence) <= max_chars:
         return [sentence]
     # まず括弧内も含めた句点で、次に読点で、最後に文字数で割る
@@ -121,7 +154,7 @@ def _split_long(sentence: str, max_chars: int) -> list[str]:
         if len(parts) > 1:
             out: list[str] = []
             for p in _pack(parts, max_chars):
-                out.extend(_split_long(p, max_chars) if len(p) > max_chars and p != sentence else [p])
+                out.extend(_split_long_raw(p, max_chars) if len(p) > max_chars and p != sentence else [p])
             return out
     return [sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)]
 
@@ -165,8 +198,8 @@ def build_chapters(text: str, chapter_regex: str, max_chars: int = 120) -> list[
         for para in split_paragraphs(body):
             p_idx = len(paragraphs)
             segs = [
-                Segment(c_idx, p_idx, s_idx, classify(s), s)
-                for s_idx, s in enumerate(split_sentences(para, max_chars))
+                Segment(c_idx, p_idx, s_idx, kind, s)
+                for s_idx, (s, kind) in enumerate(split_sentences_with_kind(para, max_chars))
             ]
             if segs:
                 paragraphs.append(segs)
