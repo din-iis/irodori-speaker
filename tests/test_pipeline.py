@@ -383,6 +383,31 @@ def test_synthesize_book_full_after_subsets(book):
     assert res.full_path is not None and res.full_path.exists()
 
 
+def test_full_synthesis_writes_signatures(book):
+    cfg, out, titles, rows = book
+    res = pipeline.synthesize_book(rows, titles, cfg, out, FakeSynth(out / "segments"))
+    assert res.stale_chapters == []
+    for p in res.chapter_files:
+        sig = p.with_name(p.name + ".sig")
+        assert sig.exists() and len(sig.read_text(encoding="utf-8").strip()) == 40
+    assert res.full_path is not None
+
+
+def test_stale_chapter_wav_is_not_joined(book):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    first = pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    ch2 = first.chapter_files[1]
+    before = ch2.read_bytes()
+    edited = [dict(r, text=r["text"] + "あ") if int(r["chapter"]) == 1 else r for r in rows]
+    res = pipeline.synthesize_book(edited, titles, cfg, out, synth, chapters={1})
+    assert res.full_path is None
+    assert res.stale_chapters == [2]
+    assert ch2.read_bytes() == before
+    res2 = pipeline.synthesize_book(edited, titles, cfg, out, synth, chapters={2})
+    assert res2.full_path is not None and res2.stale_chapters == []
+
+
 def test_synthesize_book_should_stop(book):
     cfg, out, titles, rows = book
     calls = {"n": 0}

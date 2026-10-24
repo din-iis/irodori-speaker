@@ -123,7 +123,10 @@ def _run_synth(args, cfg: Config, out_dir: Path) -> int:
     if result.full_path:
         print(f"完了: {result.full_path}")
     else:
-        print("章ごとの WAV を出力しました（全章が揃っていないため通しは未作成）:")
+        note = ""
+        if result.stale_chapters:
+            note = "。台本と一致しない章: " + ", ".join(str(n) for n in result.stale_chapters)
+        print(f"章ごとの WAV を出力しました（全章が揃っていないか、台本と一致しない章があるため通しは未作成{note}）:")
         for p in result.chapter_files:
             print(f"  {p}")
     warnings = out_dir / "warnings.log"

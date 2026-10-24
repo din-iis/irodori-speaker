@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -21,6 +22,7 @@ class BookResult:
     chapter_files: list[Path]
     full_path: Path | None
     stopped: bool
+    stale_chapters: list[int] = field(default_factory=list)  # 1 始まり。台本と一致しない章 WAV
 
 
 def parse_chapter_range(spec: str | None) -> set[int] | None:
@@ -246,14 +248,50 @@ def synthesize_book(
                 progress(done, total, f"章 {idx + 1} / 文 {done}/{total}")
         ch_path = _chapter_path(out_dir, idx, titles)
         write_chapter(ch_path, clips, cfg.silence)
+        _sig_path(ch_path).write_text(chapter_signature(_sorted_rows(by_chapter[idx]), cfg, synth), encoding="utf-8")
         chapter_files.append(ch_path)
 
-    all_paths = [_chapter_path(out_dir, idx, titles) for idx in sorted(titles)]
+    # 全章の WAV があり、署名が現在の台本と一致するときだけ通しを作る
+    all_paths: list[Path] = []
+    stale: list[int] = []
+    missing = False
+    for idx in sorted(titles):
+        p = _chapter_path(out_dir, idx, titles)
+        all_paths.append(p)
+        if not p.exists():
+            missing = True
+            continue
+        sig = _sig_path(p)
+        expected = chapter_signature(_sorted_rows(by_chapter.get(idx, [])), cfg, synth)
+        if not sig.exists() or sig.read_text(encoding="utf-8").strip() != expected:
+            stale.append(idx + 1)
+            print(
+                f"[pipeline] 章 {idx + 1} の音声が台本と一致しないため通しは作りません"
+                f"（synth --chapters {idx + 1} で作り直してください）"
+            )
     full: Path | None = None
-    if all_paths and all(p.exists() for p in all_paths):
+    if all_paths and not missing and not stale:
         full = out_dir / f"{out_dir.name}_full.wav"
         concat_wavs(all_paths, full)
-    return BookResult(chapter_files, full, stopped=False)
+    return BookResult(chapter_files, full, stopped=False, stale_chapters=stale)
+
+
+def _sorted_rows(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=lambda r: (int(r["chapter"]), int(r["para"]), int(r["seg"])))
+
+
+def _sig_path(chapter_wav: Path) -> Path:
+    return chapter_wav.with_name(chapter_wav.name + ".sig")
+
+
+def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
+    payload = [
+        [spoken_text(r) for r in rows],
+        asdict(cfg.sampling),
+        cfg.checkpoint,
+        getattr(synth, "latent_key", None),
+    ]
+    return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _chapter_path(out_dir: Path, idx: int, titles: dict[int, str]) -> Path:
