@@ -69,6 +69,7 @@ uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
 
 ## 注意点
 
+- 文末の句点（閉じ括弧の直前を含む）は、モデルに渡す前に `synth.tts_text` で外す（句点で終わると文末に余計な音が入るため）。台本の `text` は変えない。加工規則を変えるときは `TEXT_RULE` を更新する（文のキャッシュと章署名に入る）。
 - `torch` と `irodori_tts` は `synth.py` / `webui.py` 内（と `cli._make_synthesizer`）で遅延 import している。トップレベルに移すと Mac でのテストと `script` が壊れる。`emotion.py` も `pipeline.annotate_chapters` の中で遅延 import している（`--no-emotion` を動かすため）。TTS の import に失敗したら `cli.py` が案内を出して終了コード 2 で止まる。
 - **8GB の GPU では LLM と TTS を同時に載せない**。`run` は台本 → LLM 解放 → 音声化の順。`load_runtime` はモデルを読み込む前に `check_vram`（`min_free_vram_gb`）で空きを確認し、足りなければ LLM サーバーの停止を案内する。モデルを切り替えるときは旧 runtime を先に解放してから確認する（上流は新旧を同時に持つため）。
 - LLM の `ollama` は OpenAI 互換ではなく**ネイティブ `/api/chat`** を使う。`think: false` と `format`（JSON Schema）、`keep_alive: 0` が確実に効くため（OpenAI 互換経由では思考モードの無効化が届かない報告がある）。`openai` は `response_format`（400 なら `json_object`、さらに 400 なら余分なキーを外す）と `chat_template_kwargs` / `reasoning_effort` を送り、`<think>` は除去する。

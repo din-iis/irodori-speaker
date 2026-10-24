@@ -13,6 +13,7 @@ from irodori_speaker.synth import (
     collect_warnings,
     latent_key,
     latent_key_for,
+    tts_text,
 )
 
 
@@ -238,7 +239,7 @@ def test_generate_once_returns_audio_without_caching(make_synth, monkeypatch):
     assert sr == 24000 and audio.shape == (4,) and audio.dtype == np.float32
     assert warns == ["warn"]
     assert rt.calls[0].seed is None and rt.calls[0].num_steps == 4
-    assert rt.calls[0].duration_scale == 1.0
+    assert rt.calls[0].duration_scale == 0.8
     assert not list(s.segments_dir.iterdir())
 
 
@@ -439,3 +440,40 @@ def test_release_runtime_without_irodori_tts_is_noop(monkeypatch):
     monkeypatch.setattr(synth, "_LOADED_KEY", None)
     synth.release_runtime()  # 例外にならない
     assert synth._LOADED_KEY is None
+
+
+@pytest.mark.parametrize(
+    "src,expected",
+    [
+        ("こんにちは。", "こんにちは"),
+        ("「行こう。」", "「行こう」"),
+        ("本当？", "本当？"),
+        ("😊そうだね。", "😊そうだね"),
+        ("……。", "……"),
+        ("。", "。"),
+        ("わかった。 ", "わかった"),
+        ("ええ、", "ええ、"),
+        ("やった！」", "やった！」"),
+        ("おはよう．．", "おはよう"),
+    ],
+)
+def test_tts_text(src, expected):
+    assert tts_text(src) == expected
+
+
+def test_request_strips_final_period(make_synth):
+    s, _ = make_synth()
+    assert s._request("こんにちは。").text == "こんにちは"
+
+
+def test_synthesize_passes_stripped_text_to_runtime(make_synth):
+    s, rt = make_synth()
+    s.synthesize("こんにちは。")
+    assert rt.calls[0].text == "こんにちは"
+
+
+def test_cache_key_includes_text_rule(monkeypatch):
+    cfg = Config(device="cpu")
+    before = cache_key(cfg, "hi", "L")
+    monkeypatch.setattr(synth, "TEXT_RULE", "other-rule")
+    assert cache_key(cfg, "hi", "L") != before

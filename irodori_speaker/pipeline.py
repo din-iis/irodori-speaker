@@ -10,6 +10,7 @@ from typing import Callable
 
 from .assemble import Clip, concat_wavs, safe_name, write_chapter
 from .config import EMOTIONS, Config
+from .synth import TEXT_RULE
 from .text_splitter import Chapter, build_chapters, read_text
 
 TSV_FIELDS = ["chapter", "para", "seg", "kind", "labels", "text", "source"]
@@ -321,6 +322,7 @@ def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
         asdict(cfg.silence),
         cfg.checkpoint,
         getattr(synth, "latent_key", None),
+        TEXT_RULE,
     ]
     return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 

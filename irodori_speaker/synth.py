@@ -48,11 +48,32 @@ def latent_key_for(cfg: Config, voice_key: str) -> str:
     return latent_key(voice_key, cfg.codec_repo, cfg.ref_normalize_db, max_ref)
 
 
+# モデルに渡す文字列の加工規則。変えると文のキャッシュと章 WAV の署名が作り直しになる
+TEXT_RULE = "strip-final-period-v1"
+
+_CLOSERS = "」』）)】"
+_FINAL_PERIODS = "。．"
+
+
+def tts_text(text: str) -> str:
+    """文末の句点（閉じ括弧の直前を含む）を外す。句点で終わると文末に余計な音が入るため。"""
+    body = text.rstrip()
+    tail = ""
+    while body and body[-1] in _CLOSERS:
+        tail = body[-1] + tail
+        body = body[:-1]
+    stripped = body.rstrip(_FINAL_PERIODS)
+    if not stripped.strip():
+        return text
+    return stripped + tail
+
+
 def cache_key(cfg: Config, text: str, latent_key: str) -> str:
     s = cfg.sampling
     return _sha1(
         {
             "text": text,
+            "text_rule": TEXT_RULE,
             "latent": latent_key,
             "checkpoint": cfg.checkpoint,
             "num_steps": s.num_steps,
@@ -246,7 +267,7 @@ class Synthesizer:
         params = {f: getattr(s, f) for f in _SAMPLING_FIELDS}
         params.update(overrides)
         return _sampling_request(
-            text=text,
+            text=tts_text(text),
             ref_latent=str(self.latent_path),
             max_ref_seconds=self.cfg.max_ref_seconds,
             **params,

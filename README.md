@@ -247,7 +247,7 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 | `voices_dir` / `voice` | `voices` / 既定なし（例: `narrator`） | 参照音声の置き場所と、使う声の ID。`voice` が未設定だと `synth` は案内を出して止まる（`--voice` でも指定できる） |
 | `ref_normalize_db` | `-16.0` | 参照音声のラウドネス正規化（`null` で無効） |
 | `max_ref_seconds` | `null` | 参照音声の上限秒数。`null` はチェックポイントの既定（v4 は 120 秒） |
-| `sampling.*` | | `num_steps`・`cfg_scale_text`（3.0）・`cfg_scale_speaker`（5.0）・`duration_scale`・`t_schedule_mode`・`sway_coeff`・`max_seconds`（30.0）・`seed`（42） |
+| `sampling.*` | | `num_steps`・`cfg_scale_text`（3.0）・`cfg_scale_speaker`（5.0）・`duration_scale`（0.8）・`t_schedule_mode`・`sway_coeff`・`max_seconds`（30.0）・`seed`（42） |
 | `emotion_mode` | `emoji` | `emoji` か `none`（`none` は LLM を使わない） |
 | `narration_intensity_shift` | `1` | 地の文の強度を下げる量 |
 | `emotion_emoji` | | 感情 × 強度（1/2/3）→ 挿入する絵文字。空文字は挿入なし。要素は必ず 3 つ |
@@ -305,6 +305,7 @@ llm:
 - **声の同意**: 他人の声を、本人の同意なく複製しないでください（モデルカードの倫理規定）。参照音声には、自分の声か、利用許諾を得た声だけを使ってください。
 - **漢字の読み間違い**: 青空文庫形式のルビ（`|漢字《かんじ》`）で小説本文に読みを書くか、`script.tsv` の `text` 列を直してください。ルビは読み仮名に置き換えて読み上げます。青空文庫の注記（`［＃…］`）は取り除きます。
 - **8GB の制約**: LLM と TTS を同時に載せません。`script`（`run` の前半）の終了後に LLM を解放してから `synth` を行います。
+- **文末の句点**: モデルに渡す前に外します（句点で終わると文末に余計な音が入るため）。`script.tsv` の `text` 列は変えません。
 - 1 回に合成するのは 40 文字までです。長い文は読点の位置で分けて合成します（長い文は後半で参照音声の声から離れやすいため）。長い文が 30 秒を超えて切り詰められたときは、`warnings.log` に記録されます。
 
 ## テスト

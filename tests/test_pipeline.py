@@ -447,6 +447,15 @@ def test_signature_depends_on_paragraph_layout(book):
     assert pipeline.chapter_signature(ch, cfg, synth) != pipeline.chapter_signature(moved, cfg, synth)
 
 
+def test_signature_depends_on_text_rule(book, monkeypatch):
+    cfg, out, titles, rows = book
+    ch = [r for r in rows if int(r["chapter"]) == 0]
+    synth = FakeSynth(out / "segments")
+    before = pipeline.chapter_signature(ch, cfg, synth)
+    monkeypatch.setattr(pipeline, "TEXT_RULE", "other-rule")
+    assert pipeline.chapter_signature(ch, cfg, synth) != before
+
+
 def test_stale_full_wav_is_removed(book):
     cfg, out, titles, rows = book
     synth = FakeSynth(out / "segments")

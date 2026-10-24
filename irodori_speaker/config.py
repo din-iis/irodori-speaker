@@ -46,7 +46,7 @@ class SamplingConfig:
     sway_coeff: float = -1.0
     cfg_scale_text: float = 3.0
     cfg_scale_speaker: float = 5.0
-    duration_scale: float = 1.0
+    duration_scale: float = 0.8
     max_seconds: float = 30.0
     seed: int | None = 42
 
