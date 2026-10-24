@@ -12,6 +12,7 @@ from irodori_speaker.synth import (
     check_vram,
     collect_warnings,
     latent_key,
+    latent_key_for,
 )
 
 
@@ -73,7 +74,7 @@ def _fake_torch(monkeypatch, available=True, free_gb=8.0):
     calls = {"empty_cache": 0}
     cuda = types.SimpleNamespace(
         is_available=lambda: available,
-        mem_get_info=lambda: (int(free_gb * 2**30), 8 * 2**30),
+        mem_get_info=lambda device=None: (calls.__setitem__("device", device), (int(free_gb * 2**30), 8 * 2**30))[1],
         empty_cache=lambda: calls.__setitem__("empty_cache", calls["empty_cache"] + 1),
     )
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=cuda))
@@ -224,3 +225,31 @@ def test_generate_once_returns_audio_without_caching(make_synth, monkeypatch):
     assert rt.calls[0].seed is None and rt.calls[0].num_steps == 4
     assert rt.calls[0].duration_scale == 1.0
     assert not list(s.segments_dir.iterdir())
+
+
+def test_latent_key_for_none_depends_on_checkpoint():
+    assert latent_key_for(Config(checkpoint="a"), "v") != latent_key_for(Config(checkpoint="b"), "v")
+
+
+def test_latent_key_for_explicit_ignores_checkpoint():
+    a = latent_key_for(Config(checkpoint="a", max_ref_seconds=60), "v")
+    assert a == latent_key_for(Config(checkpoint="b", max_ref_seconds=60), "v")
+
+
+def test_synthesizer_latent_key_matches_helper(make_synth):
+    s, _ = make_synth()
+    assert s.latent_key == latent_key_for(s.cfg, synth._voice_key(s.voice_paths))
+
+
+def test_check_vram_passes_device(monkeypatch):
+    calls = _fake_torch(monkeypatch, free_gb=6.0)
+    check_vram(Config(device="cuda:1", min_free_vram_gb=3.0))
+    assert calls["device"] == "cuda:1"
+
+
+def test_cache_hit_clears_last_warnings(make_synth):
+    s, _ = make_synth(runtime=FakeRuntime(["bad thing"]))
+    s.synthesize("hi")
+    assert s.last_warnings == ["bad thing"]
+    s.synthesize("hi")
+    assert s.last_warnings == []

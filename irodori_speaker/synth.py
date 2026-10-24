@@ -27,7 +27,7 @@ def check_vram(cfg: Config) -> None:
 
     if not torch.cuda.is_available():
         return
-    free, _total = torch.cuda.mem_get_info()
+    free, _total = torch.cuda.mem_get_info(cfg.device)
     free_gb = free / 2**30
     if free_gb < cfg.min_free_vram_gb:
         raise RuntimeError(
@@ -40,6 +40,12 @@ def latent_key(
     voice_key: str, codec_repo: str, normalize_db: float | None, max_ref_seconds: float | None
 ) -> str:
     return _sha1([voice_key, codec_repo, normalize_db, max_ref_seconds])
+
+
+def latent_key_for(cfg: Config, voice_key: str) -> str:
+    # max_ref_seconds が None のときの実効上限はチェックポイント依存なので、キーに checkpoint を含める
+    max_ref = cfg.max_ref_seconds if cfg.max_ref_seconds is not None else f"checkpoint:{cfg.checkpoint}"
+    return latent_key(voice_key, cfg.codec_repo, cfg.ref_normalize_db, max_ref)
 
 
 def cache_key(cfg: Config, text: str, latent_key: str) -> str:
@@ -103,7 +109,7 @@ def encode_voice(runtime, paths: list[Path], cache_dir: Path, cfg: Config) -> Pa
     max_ref = (
         cfg.max_ref_seconds if cfg.max_ref_seconds is not None else float(runtime.default_max_ref_seconds)
     )
-    key = latent_key(_voice_key(paths), cfg.codec_repo, cfg.ref_normalize_db, cfg.max_ref_seconds)
+    key = latent_key_for(cfg, _voice_key(paths))
     cache_dir = Path(cache_dir)
     path = cache_dir / f"{key}.pt"
     if path.exists():
@@ -179,9 +185,7 @@ class Synthesizer:
         self.latent_cache_dir = Path(latent_cache_dir)
         self.warnings_path = Path(warnings_path) if warnings_path else None
         self.last_warnings: list[str] = []
-        self.latent_key = latent_key(
-            _voice_key(self.voice_paths), cfg.codec_repo, cfg.ref_normalize_db, cfg.max_ref_seconds
-        )
+        self.latent_key = latent_key_for(cfg, _voice_key(self.voice_paths))
         self._runtime = None
         self._latent_path: Path | None = None
         self._count = 0
@@ -216,6 +220,7 @@ class Synthesizer:
         key = cache_key(self.cfg, text, self.latent_key)
         path = self.segments_dir / f"{key}.wav"
         if path.exists() and not force:
+            self.last_warnings = []
             return path
         res = self.runtime.synthesize(self._request(text))
         tmp = path.with_name(f"{key}.tmp.wav")

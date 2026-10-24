@@ -94,3 +94,9 @@ def test_describe_voice_unreadable_clip(voices):
     s = describe_voice([voices / "x" / "bad.mp3", voices / "alice" / "01.wav"])
     assert "秒数不明のクリップあり" in s
     assert "合計 0.5 秒" in s
+
+
+def test_uppercase_extension_listed_and_resolved(tmp_path):
+    _wav(tmp_path / "narrator.WAV")
+    assert list_voices(tmp_path) == ["narrator"]
+    assert resolve_voice(tmp_path, "narrator") == [tmp_path / "narrator.WAV"]

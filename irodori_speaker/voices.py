@@ -50,11 +50,11 @@ def resolve_voice(voices_dir: Path, voice: str) -> list[Path]:
             return clips
         return [direct]
 
-    files = [
-        voices_dir / f"{voice}{ext}"
-        for ext in sorted(AUDIO_EXTS)
-        if (voices_dir / f"{voice}{ext}").is_file()
-    ]
+    files = (
+        sorted(p for p in voices_dir.iterdir() if _is_audio(p) and p.stem == voice)
+        if voices_dir.is_dir()
+        else []
+    )
     d = voices_dir / voice
     clips = _dir_clips(d) if d.is_dir() else []
     if len(files) + (1 if clips else 0) > 1:
