@@ -12,6 +12,7 @@ from irodori_speaker.webui import (
     parse_seed,
     parse_steps,
     rows_from_dataframe,
+    should_reload,
     stream_progress,
 )
 
@@ -289,3 +290,39 @@ def test_台本段階の前に_TTS_を解放する(monkeypatch, tmp_path):
     with pytest.raises(Exception):  # build_script をモックしたので load_book が失敗する
         list(gen)
     assert events[:2] == ["release", "script"]
+
+
+def test_should_reload_は小説が変わったときだけ真(tmp_path):
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    assert should_reload(a, None)
+    assert not should_reload(a, str(a))
+    assert should_reload(b, str(a))
+
+
+def test_show_script_は同じ小説なら表を変えない(monkeypatch, tmp_path):
+    fns, _events = _handlers(monkeypatch, tmp_path)
+    from irodori_speaker.pipeline import book_dir, write_script
+
+    novel = tmp_path / "n.txt"
+    novel.write_text("第一章\n本文です。\n", encoding="utf-8")
+    cfg = load_config("config.example.yaml")
+    out_dir = book_dir(replace_output(cfg, tmp_path), novel)
+    out_dir.mkdir(parents=True)
+    (out_dir / "chapters.json").write_text('{"chapters": [{"idx": 0, "title": "t"}]}', encoding="utf-8")
+    write_script(out_dir / "script.tsv", [_row(0, "あ")])
+
+    table, rows, status, loaded = fns["show_script"](None, str(novel), None)
+    assert rows and loaded == str(novel)
+    again = fns["show_script"](None, str(novel), loaded)
+    assert again[1] == {"__type__": "update"} and again[0] == {"__type__": "update"}
+    assert again[3] == loaded
+
+    other = tmp_path / "m.txt"
+    other.write_text("本文", encoding="utf-8")
+    assert fns["show_script"](None, str(other), loaded)[3] == str(other)
+
+
+def replace_output(cfg, tmp_path):
+    from dataclasses import replace
+
+    return replace(cfg, output_dir=str(tmp_path / "out"))

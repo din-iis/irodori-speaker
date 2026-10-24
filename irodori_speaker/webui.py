@@ -191,6 +191,11 @@ def _novel_path(novel_file, novel_text) -> Path:
     return path
 
 
+def should_reload(path, loaded) -> bool:
+    """直近に表へ読み込んだ小説（loaded）と違うときだけ、台本を読み直す。"""
+    return loaded is None or str(path) != str(loaded)
+
+
 def _existing_rows(out_dir: Path) -> list[dict]:
     try:
         return load_book(out_dir)[1]
@@ -465,15 +470,20 @@ def build_app(cfg: Config):
 
     # -- 小説生成 --
 
-    def show_script(novel_file, novel_text):
-        """小説を選んだとき、既存の script.tsv があれば表示する。"""
+    def show_script(novel_file, novel_text, loaded):
+        """選択中の小説が変わったとき、既存の script.tsv があれば表示する。"""
+        keep = gr.update()
         try:
-            rows = _existing_rows(book_dir(cfg, _novel_path(novel_file, novel_text)))
+            novel = _novel_path(novel_file, novel_text)
         except ValueError:
-            rows = []
+            return keep, keep, keep, loaded
+        if not should_reload(novel, loaded):
+            return keep, keep, keep, loaded  # 同じ小説なら未保存の編集を消さない
+        rows = _existing_rows(book_dir(cfg, novel))
         if not rows:
-            return gr.update(value=[]), [], gr.update()
-        return gr.update(value=dataframe_rows(rows)), rows, f"既存の script.tsv を読み込みました（{len(rows)} 行）"
+            return gr.update(value=[]), [], keep, str(novel)
+        status = f"既存の script.tsv を読み込みました（{len(rows)} 行）"
+        return gr.update(value=dataframe_rows(rows)), rows, status, str(novel)
 
     def save_script(df, original, novel_file, novel_text):
         try:
@@ -617,7 +627,10 @@ def build_app(cfg: Config):
 
     def make_handler(mode):
         def handler(*args, progress=gr.Progress()):
-            yield from run_novel(mode, *args, progress=progress)
+            for out in run_novel(mode, *args, progress=progress):
+                # 表を更新したら、直近に読み込んだ小説もそれに合わせる（blur で消えないように）
+                table_updated = mode != "synth" and isinstance(out[2], list)
+                yield (*out, str(_novel_path(args[0], args[1])) if table_updated else gr.update())
 
         handler.__name__ = f"run_{mode}"
         return handler
@@ -738,6 +751,7 @@ def build_app(cfg: Config):
                 label="台本（text 列だけ編集できます）", **table_kwargs,
             )
             script_rows = gr.State([])
+            loaded_novel = gr.State(None)
             save_btn = gr.Button("script.tsv を保存")
             novel_status = gr.Textbox(label="状態", interactive=False)
             chapter_files = gr.Files(label="章ごとの WAV")
@@ -747,13 +761,15 @@ def build_app(cfg: Config):
                 novel_file, novel_text, chapters, no_emotion, reannotate, force,
                 *tts_inputs, *llm_inputs, table, script_rows,
             ]
-            novel_outputs = [novel_status, table, script_rows, chapter_files, full_audio]
+            novel_outputs = [novel_status, table, script_rows, chapter_files, full_audio, loaded_novel]
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):
                 btn.click(make_handler(mode), novel_inputs, novel_outputs, **gpu)
             stop_btn.click(stop_run, None, None)
             save_btn.click(save_script, [table, script_rows, novel_file, novel_text], [script_rows, novel_status])
             for trigger in (novel_file.change, novel_text.submit, novel_text.blur):
-                trigger(show_script, [novel_file, novel_text], [table, script_rows, novel_status])
+                trigger(
+                    show_script, [novel_file, novel_text, loaded_novel], [table, script_rows, novel_status, loaded_novel]
+                )
 
     app.irodori_css = css  # Gradio 6 以降は css を launch() に渡す
     return app
