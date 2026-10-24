@@ -546,3 +546,78 @@ def test_annotate_many_reports_progress_even_on_error(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         ann.annotate_many([(segs("A。"), None, None)], progress=lambda d, t: calls.append((d, t)))
     assert calls == [(1, 1)]
+
+
+# ---- レビュー指摘の修正 2 ----
+
+
+@pytest.mark.parametrize(
+    "api,payload",
+    [
+        ("openai", {"choices": []}),
+        ("openai", {"choices": [{"message": {"content": None}}]}),
+        ("openai", {}),
+        ("ollama", {"message": {"content": None}}),
+    ],
+)
+def test_annotate_falls_back_on_malformed_response(tmp_path, monkeypatch, capsys, api, payload):
+    monkeypatch.setattr(requests, "post", lambda url, **kw: FakeResp(payload))
+    cache = tmp_path / "a.jsonl"
+    ann = LLMAnnotator(LLMConfig(api=api, base_url="http://h/v1"), cache)
+    out = ann.annotate(segs("あ、い。"))
+    assert out == [[Annotation(), Annotation()]]
+    assert ann.cache == {}
+    assert not cache.exists()
+    assert "[emotion]" in capsys.readouterr().out
+
+
+def test_annotate_many_survives_malformed_response(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda url, **kw: FakeResp({"choices": []}))
+    ann = LLMAnnotator(LLMConfig(api="openai", base_url="http://h/v1"), tmp_path / "a.jsonl")
+    out = ann.annotate_many([(segs("あ。"), None, None), (segs("い。"), None, None)])
+    assert out == [[[Annotation()]], [[Annotation()]]]
+
+
+def test_cache_key_includes_think(tmp_path, monkeypatch):
+    cache = tmp_path / "a.jsonl"
+    calls = []
+    target = segs("ふざけるな！")
+    for think in (False, False, True):
+        ann = LLMAnnotator(LLMConfig(think=think), cache)
+        monkeypatch.setattr(ann, "_chat", lambda p: calls.append(p) or {"segments": []})
+        ann.annotate(target)
+    assert len(calls) == 2
+
+
+def test_paragraph_hash_depends_on_think():
+    c = [["あ。"]]
+    assert paragraph_hash("m", c, None, None, False) != paragraph_hash("m", c, None, None, True)
+
+
+@pytest.mark.parametrize("unload,terminated", [(False, False), (True, True)])
+def test_server_exit_respects_unload(monkeypatch, unload, terminated):
+    proc = FakeProc()
+    monkeypatch.setattr(emotion.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(emotion.time, "sleep", lambda s: None)
+    state = {"n": 0}
+
+    def fake_get(url, **kw):
+        state["n"] += 1
+        if state["n"] < 2:
+            raise requests.ConnectionError("x")
+        return FakeResp(status=200)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    with LLMServer(LLMConfig(server_command=["srv"], unload=unload)):
+        pass
+    assert proc.terminated is terminated
+
+
+def test_server_startup_timeout_stops_even_when_unload_false(monkeypatch, clock):
+    proc = FakeProc()
+    monkeypatch.setattr(emotion.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
+    with pytest.raises(RuntimeError):
+        with LLMServer(LLMConfig(server_command=["srv"], server_start_timeout=2, unload=False)):
+            pass
+    assert proc.terminated

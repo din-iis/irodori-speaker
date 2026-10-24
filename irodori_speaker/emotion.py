@@ -133,9 +133,10 @@ def paragraph_hash(
     clauses: list[list[str]],
     prev: str | None = None,
     nxt: str | None = None,
+    think: bool = False,
 ) -> str:
-    """段落と前後の文脈（None も区別）からキャッシュキーを作る。"""
-    payload = json.dumps([model, clauses, prev, nxt], ensure_ascii=False)
+    """段落・前後の文脈（None も区別）・思考モードからキャッシュキーを作る。"""
+    payload = json.dumps([model, clauses, prev, nxt, think], ensure_ascii=False)
     return hashlib.sha1(payload.encode()).hexdigest()
 
 
@@ -234,7 +235,10 @@ class LLMAnnotator:
             timeout=self.cfg.timeout,
         )
         resp.raise_for_status()
-        return json.loads(resp.json()["message"]["content"])
+        content = resp.json()["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
+        return json.loads(content)
 
     def _chat_openai(self, user_prompt: str) -> object:
         headers = _auth_headers(self.cfg)
@@ -261,7 +265,12 @@ class LLMAnnotator:
                 for key in ("response_format", "chat_template_kwargs", "reasoning_effort"):
                     body.pop(key, None)
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        choices = resp.json().get("choices")
+        if not choices:
+            raise ValueError("応答の choices が空です")
+        content = choices[0]["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
         return json.loads(_THINK_RE.sub("", content).strip())
 
     def annotate(
@@ -274,7 +283,7 @@ class LLMAnnotator:
         shape = [len(c) for c in clauses]
         prev_text = "".join(s.text for s in prev) if prev else None
         nxt_text = "".join(s.text for s in nxt) if nxt else None
-        key = paragraph_hash(self.cfg.model, clauses, prev_text, nxt_text)
+        key = paragraph_hash(self.cfg.model, clauses, prev_text, nxt_text, self.cfg.think)
         with self._lock:
             cached = self.cache.get(key)
         if cached is not None:
@@ -282,7 +291,14 @@ class LLMAnnotator:
         prompt = build_user_prompt(prev_text, clauses, nxt_text)
         try:
             anns = validate(self._chat(prompt), shape)
-        except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
+        except (
+            requests.RequestException,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+            TypeError,
+            IndexError,
+        ) as e:
             print(f"[emotion] LLM の推定に失敗したため neutral にします: {e}")
             return validate(None, shape)  # 失敗はキャッシュしない
         rows = [[a.__dict__.copy() for a in row] for row in anns]
@@ -326,7 +342,11 @@ def _health_url(cfg: LLMConfig) -> str:
 
 
 class LLMServer:
-    """`with LLMServer(cfg): ...` で、必要なら LLM サーバーを起動し、抜けるときに止める。"""
+    """`with LLMServer(cfg): ...` で、必要なら LLM サーバーを起動し、抜けるときに止める。
+
+    unload=False なら、自分で起動したサーバーも抜けるときに止めずに残す
+    （起動待ちのタイムアウト時の後始末だけは常に止める）。
+    """
 
     def __init__(self, cfg: LLMConfig) -> None:
         self.cfg = cfg
@@ -370,7 +390,8 @@ class LLMServer:
         )
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        self._stop()
+        if self.cfg.unload:
+            self._stop()
         return False
 
 
