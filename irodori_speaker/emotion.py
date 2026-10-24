@@ -140,6 +140,13 @@ def paragraph_hash(
     return hashlib.sha1(payload.encode()).hexdigest()
 
 
+def _json_object(resp: requests.Response) -> dict:
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("応答が JSON オブジェクトではありません")
+    return data
+
+
 def _auth_headers(cfg: LLMConfig) -> dict[str, str]:
     return {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
 
@@ -250,7 +257,7 @@ class LLMAnnotator:
             timeout=self.cfg.timeout,
         )
         resp.raise_for_status()
-        content = resp.json()["message"]["content"]
+        content = _json_object(resp)["message"]["content"]
         if not isinstance(content, str):
             raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
         return json.loads(content)
@@ -280,7 +287,7 @@ class LLMAnnotator:
                 for key in ("response_format", "chat_template_kwargs", "reasoning_effort"):
                     body.pop(key, None)
         resp.raise_for_status()
-        choices = resp.json().get("choices")
+        choices = _json_object(resp).get("choices")
         if not choices:
             raise ValueError("応答の choices が空です")
         content = choices[0]["message"]["content"]
@@ -313,6 +320,7 @@ class LLMAnnotator:
             ValueError,
             TypeError,
             IndexError,
+            AttributeError,
         ) as e:
             print(f"[emotion] LLM の推定に失敗したため neutral にします: {e}")
             return validate(None, shape)  # 失敗はキャッシュしない
@@ -334,12 +342,16 @@ class LLMAnnotator:
         progress: Callable[[int, int], None] | None = None,
     ) -> list[list[list[Annotation]]]:
         workers = max(1, self.cfg.concurrency)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = [pool.submit(self.annotate, t, p, n) for t, p, n in items]
             if progress is not None:
                 for done, _ in enumerate(concurrent.futures.as_completed(futures), 1):
                     progress(done, len(futures))
             return [f.result() for f in futures]
+        finally:
+            # Ctrl+C などの中断時は、未実行の問い合わせを取り消してから抜ける
+            pool.shutdown(wait=True, cancel_futures=True)
 
     def unload(self) -> None:
         """Ollama のモデルを即時解放する。openai のときは LLMServer が担当。"""

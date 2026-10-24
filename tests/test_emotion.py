@@ -669,3 +669,39 @@ def test_annotator_skips_rows_missing_keys(tmp_path):
     cache = tmp_path / "a.jsonl"
     cache.write_text('{"hash": "x"}\n[]\n{"annotations": []}\n', encoding="utf-8")
     assert LLMAnnotator(LLMConfig(), cache).cache == {}
+
+
+# ---- レビュー指摘の修正 4 ----
+
+
+def test_annotate_many_interrupt_cancels_pending(tmp_path, monkeypatch):
+    import time
+
+    ann = LLMAnnotator(LLMConfig(concurrency=2), tmp_path / "a.jsonl")
+    calls = []
+
+    def fake_chat(prompt):
+        calls.append(prompt)
+        time.sleep(0.05)
+        return {"segments": []}
+
+    monkeypatch.setattr(ann, "_chat", fake_chat)
+
+    def interrupt(done, total):
+        raise KeyboardInterrupt
+
+    items = [(segs(f"文{i}。"), None, None) for i in range(6)]
+    with pytest.raises(KeyboardInterrupt):
+        ann.annotate_many(items, progress=interrupt)
+    assert len(calls) < len(items)
+
+
+@pytest.mark.parametrize("api", ["openai", "ollama"])
+@pytest.mark.parametrize("payload", [None, []])
+def test_annotate_falls_back_on_non_object_response(tmp_path, monkeypatch, api, payload):
+    monkeypatch.setattr(requests, "post", lambda url, **kw: FakeResp(payload))
+    cache = tmp_path / "a.jsonl"
+    ann = LLMAnnotator(LLMConfig(api=api, base_url="http://h/v1"), cache)
+    assert ann.annotate(segs("あ、い。")) == [[Annotation(), Annotation()]]
+    assert ann.cache == {}
+    assert not cache.exists()
