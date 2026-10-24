@@ -391,3 +391,51 @@ def test_loaded_key_reset_when_load_fails(fake_upstream, monkeypatch):
     with pytest.raises(RuntimeError):
         _real_synth(fake_upstream, checkpoint=str(other), name="2").runtime
     assert synth._LOADED_KEY is None
+
+
+def _fake_upstream(monkeypatch):
+    calls = {"clear": 0, "get": 0}
+
+    class Key(types.SimpleNamespace):
+        def __eq__(self, other):
+            return vars(self) == vars(other)
+
+    def get_cached_runtime(key):
+        calls["get"] += 1
+        rt = types.SimpleNamespace(model_cfg=types.SimpleNamespace(use_speaker_condition_resolved=True))
+        return rt, True
+
+    def clear_cached_runtime():
+        calls["clear"] += 1
+
+    mod = types.ModuleType("irodori_tts.inference_runtime")
+    mod.RuntimeKey = lambda **kw: Key(**kw)
+    mod.get_cached_runtime = get_cached_runtime
+    mod.clear_cached_runtime = clear_cached_runtime
+    monkeypatch.setitem(sys.modules, "irodori_tts", types.ModuleType("irodori_tts"))
+    monkeypatch.setitem(sys.modules, "irodori_tts.inference_runtime", mod)
+    monkeypatch.setattr(synth, "_LOADED_KEY", None)
+    return calls
+
+
+def test_release_runtime_clears_upstream_and_rechecks_vram(monkeypatch):
+    calls = _fake_upstream(monkeypatch)
+    checks = []
+    monkeypatch.setattr(synth, "check_vram", lambda cfg: checks.append(1))
+    cfg = Config(device="cpu")
+    synth.load_runtime(cfg, "ckpt")
+    synth.load_runtime(cfg, "ckpt")
+    assert len(checks) == 1  # 同じキーでは再確認しない
+    synth.release_runtime()
+    assert calls["clear"] == 1
+    assert synth._LOADED_KEY is None
+    synth.load_runtime(cfg, "ckpt")
+    assert len(checks) == 2  # 解放後は読み直しなので VRAM を再確認する
+
+
+def test_release_runtime_without_irodori_tts_is_noop(monkeypatch):
+    monkeypatch.setitem(sys.modules, "irodori_tts", None)
+    monkeypatch.setitem(sys.modules, "irodori_tts.inference_runtime", None)
+    monkeypatch.setattr(synth, "_LOADED_KEY", None)
+    synth.release_runtime()  # 例外にならない
+    assert synth._LOADED_KEY is None

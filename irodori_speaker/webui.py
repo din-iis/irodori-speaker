@@ -228,6 +228,10 @@ class Engine:
     def is_loaded(self, key: tuple) -> bool:
         return self._ready and self._key == key
 
+    def mark_unloaded(self) -> None:
+        """runtime を GPU から解放した後に呼ぶ。次の利用時に ensure_loaded が読み直す。"""
+        self._ready = False
+
     def invalidate(self) -> None:
         """声ファイルを入れ替えたときなど、Synthesizer を作り直させる。"""
         self._synth = None
@@ -293,15 +297,21 @@ def build_app(cfg: Config):
     def ensure_loaded(key, segments_dir, warnings_path=None):
         """読み込みが必要なら状態を yield してから読み込み、Synthesizer を返す。"""
         if not engine.is_loaded(key):
-            from .synth import check_vram
-
-            check_vram(engine.cfg_for(key))
             yield f"⏳ モデルを読み込み中: {key[0]}（初回は数分かかります。完了まで他の操作は待ってください）"
             t0 = time.perf_counter()
             synth = engine.load(key, segments_dir, warnings_path)
             yield f"✅ 読み込み完了 ({time.perf_counter() - t0:.0f}秒): {key[0]} / {key[1]} / {key[2]} / 声 {key[3]}"
             return synth
         return engine.load(key, segments_dir, warnings_path)
+
+    def release_tts() -> str:
+        """LLM を動かす前に TTS の runtime を GPU から外す（8GB では両方載らない）。"""
+        from . import synth as synth_mod
+
+        synth_mod.release_runtime()
+        engine.mark_unloaded()
+        print("[webui] TTS を解放しました")
+        return "🧹 TTS を解放しました"
 
     def tts_key(checkpoint, device, precision, voice):
         try:
@@ -368,7 +378,7 @@ def build_app(cfg: Config):
         llm_cfg = replace(cfg.llm, **llm_overrides_from_ui(api, base_url, model, think, concurrency))
         kind = "dialogue" if body[0] in "「『（(" else "narration"
         seg = Segment(0, 0, 0, kind, body)
-        yield gr.update(), "⏳ LLM で絵文字を付けています …"
+        yield gr.update(), release_tts() + "。⏳ LLM で絵文字を付けています …"
         try:
             with LLMServer(llm_cfg):
                 annotator = LLMAnnotator(llm_cfg, preview_dir / "annotations.jsonl")
@@ -476,6 +486,8 @@ def build_app(cfg: Config):
 
     def stage_script(novel, out_dir, chapters, no_emotion, reannotate, overrides):
         selected = parse_chapter_range(chapters)
+        if not no_emotion and cfg.emotion_mode != "none":
+            yield release_tts()
 
         def work(progress):
             return build_script(

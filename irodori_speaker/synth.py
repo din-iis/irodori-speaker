@@ -79,6 +79,17 @@ def resolve_checkpoint(checkpoint: str) -> str:
 _LOADED_KEY = None  # 直近に get_cached_runtime へ渡した RuntimeKey（上流の runtime が載っている目印）
 
 
+def release_runtime() -> None:
+    """上流のキャッシュから runtime を解放する。LLM など別の GPU 処理の前に呼ぶ。"""
+    global _LOADED_KEY
+    try:
+        from irodori_tts.inference_runtime import clear_cached_runtime
+    except ImportError:
+        return
+    clear_cached_runtime()
+    _LOADED_KEY = None
+
+
 def _runtime_key(cfg: Config, checkpoint: str | None = None):
     from irodori_tts.inference_runtime import RuntimeKey
 

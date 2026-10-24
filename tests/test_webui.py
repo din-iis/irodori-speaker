@@ -4,6 +4,7 @@ from irodori_speaker.config import load_config
 from irodori_speaker.pipeline import TSV_FIELDS
 from irodori_speaker.webui import (
     CHECKPOINT_CHOICES,
+    Engine,
     add_voice,
     dataframe_rows,
     emoji_prefixed,
@@ -229,3 +230,62 @@ def test_add_voice_は既存の声を上書きしない(tmp_path):
 def test_add_voice_は音声ファイルが無ければ拒否する(tmp_path):
     with pytest.raises(ValueError):
         add_voice(None, "narrator", tmp_path / "voices")
+
+
+def test_Engine_は_mark_unloaded_の後は未読み込みになる():
+    engine = Engine(load_config(None))
+    key = engine.key_for(None, None, None, "narrator")
+    engine._key, engine._ready = key, True
+    assert engine.is_loaded(key)
+    engine.mark_unloaded()
+    assert not engine.is_loaded(key)
+
+
+def _handlers(monkeypatch, tmp_path):
+    """build_app 内のハンドラを取り出す（release_runtime の呼び出しを記録する）。"""
+    pytest.importorskip("gradio")
+    from dataclasses import replace
+
+    from irodori_speaker import synth, webui
+
+    events = []
+    monkeypatch.setattr(synth, "release_runtime", lambda: events.append("release"))
+    app = webui.build_app(replace(load_config("config.example.yaml"), output_dir=str(tmp_path / "out")))
+    fns = {f.fn.__name__: f.fn for f in app.fns.values()}
+    return fns, events
+
+
+def test_LLM_で絵文字を付ける前に_TTS_を解放する(monkeypatch, tmp_path):
+    fns, events = _handlers(monkeypatch, tmp_path)
+    import irodori_speaker.emotion as emotion
+
+    class Boom:
+        def __init__(self, cfg):
+            pass
+
+        def __enter__(self):
+            events.append("llm")
+            raise RuntimeError("stop")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(emotion, "LLMServer", Boom)
+    gen = fns["annotate_text"]("こんにちは", "ollama", "http://x", "m", False, 1)
+    with pytest.raises(Exception):
+        list(gen)
+    assert events[:2] == ["release", "llm"]
+
+
+def test_台本段階の前に_TTS_を解放する(monkeypatch, tmp_path):
+    fns, events = _handlers(monkeypatch, tmp_path)
+    from irodori_speaker import webui
+
+    monkeypatch.setattr(webui, "build_script", lambda *a, **k: events.append("script") or [])
+    novel = tmp_path / "n.txt"
+    novel.write_text("第一章\n本文です。\n", encoding="utf-8")
+    gen = fns["run_script"](None, str(novel), "", False, False, False, None, "cpu", "fp32", "v",
+                            "ollama", "http://x", "m", False, 1, [], [])
+    with pytest.raises(Exception):  # build_script をモックしたので load_book が失敗する
+        list(gen)
+    assert events[:2] == ["release", "script"]
