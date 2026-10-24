@@ -57,7 +57,13 @@ uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
 - 潜在キャッシュ（`out/.voices/<latent_key>.pt`）: 参照音声を DACVAE で一度だけエンコードして保存し、以後は `ref_latent` で渡す。キーは参照音声の中身・`codec_repo`・`ref_normalize_db`・`max_ref_seconds`（`null` のときは checkpoint）。
 - 章 WAV は `.sig` に署名（本文・サンプリング・無音・checkpoint・潜在キー）を持ち、全体 WAV は全章が揃って署名が一致するときだけ作る。止めたとき・失敗時は古い全体 WAV を消す。
 
-`webui.py` は別の入口で、チェックポイント・device・precision が変わると runtime を読み直す。生成ハンドラは generator で状態メッセージを yield する。
+`webui.py`（Gradio、`-c` / `--host` / `--port`、既定 `127.0.0.1:7860`）は別の入口で、`Engine` が (checkpoint, device, precision, voice) の組ごとに `Synthesizer` を作り直し、変わると runtime を読み直す。生成ハンドラは generator で状態メッセージを yield する。
+
+- 「台本を作る」「一括実行」の台本部分と「LLM で絵文字を付ける」は、LLM を動かす前に TTS の runtime を GPU から解放する（8GB で両方を載せない）。TTS は次の生成で読み直される。GPU を使う操作は `concurrency_id="gpu"`（上限 1）で直列にする。
+- 「音声にする」は表の編集を `script.tsv` に保存してから `load_book` → `check_vram` → `synthesize_book` を回す。表が空なら `script.tsv` をそのまま使い、無ければ案内して止まる。表で編集できるのは `text` 列だけで、他の列は読み込み時の値を使う（`rows_from_dataframe`）。「一括実行」の合成は、直前に作った `script.tsv` をそのまま使う。
+- 「停止」は `should_stop` のフラグを立てるだけで、現在の文が終わり次第止まる。文ごとのキャッシュがあるので、再実行で続きから進む。
+- 「声を追加」は `voices/<ID><元の拡張子>` にコピーする。既存の ID は上書きせず拒否する。
+- 絵文字パレット（`irodori_tts.gradio_emoji_palette`）は import できるときだけ使い、できなければ感情プリセットの Dropdown と「絵文字を文頭に挿入」ボタンにする。「総当たり生成」は同じ seed で文頭の絵文字だけを変えて 10 感情を生成する。
 
 ## 注意点
 
