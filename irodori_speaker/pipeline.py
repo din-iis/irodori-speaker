@@ -139,8 +139,13 @@ def annotate_chapters(
             plan.append((segs, prev, nxt, kept))
     total = len(plan)
 
+    def saved_row(s) -> dict | None:
+        # 保存済みで本文が一致する行は、段落の他の文が変わっていても手修正を保つ
+        r = overrides.get(s.key)
+        return _row(s, r["labels"], r["text"]) if r is not None and r["source"] == s.text else None
+
     def neutral_row(s) -> dict:
-        return _row(s, "neutral:1", s.text)
+        return saved_row(s) or _row(s, "neutral:1", s.text)
 
     annotated: dict[int, list[dict]] = {}
     pending = [i for i, (_, _, _, kept) in enumerate(plan) if not kept]
@@ -167,6 +172,9 @@ def annotate_chapters(
         for i, para_anns in zip(pending, results):
             rows = []
             for s, sent_anns in zip(plan[i][0], para_anns):
+                if (kept_row := saved_row(s)) is not None:
+                    rows.append(kept_row)
+                    continue
                 anns = []
                 for a in sent_anns:
                     a = apply_shift(a, s.kind, cfg.narration_intensity_shift)
@@ -240,6 +248,7 @@ def synthesize_book(
         clips: list[Clip] = []
         for r in chapter_rows:
             if should_stop and should_stop():
+                _remove_old_full(out_dir)
                 return BookResult(chapter_files, None, stopped=True)
             path = synth.synthesize(spoken_text(r), force=force)
             clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"])))
@@ -273,7 +282,16 @@ def synthesize_book(
     if all_paths and not missing and not stale:
         full = out_dir / f"{out_dir.name}_full.wav"
         concat_wavs(all_paths, full)
+    else:
+        _remove_old_full(out_dir)
     return BookResult(chapter_files, full, stopped=False, stale_chapters=stale)
+
+
+def _remove_old_full(out_dir: Path) -> None:
+    old = out_dir / f"{out_dir.name}_full.wav"
+    if old.exists():
+        old.unlink()
+        print(f"[pipeline] 古い通し WAV を削除しました: {old}")
 
 
 def _sorted_rows(rows: list[dict]) -> list[dict]:

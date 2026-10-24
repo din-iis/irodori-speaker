@@ -222,6 +222,26 @@ def test_only_changed_paragraph_is_reannotated(tmp_path, fake_emotion):
     assert not any("雨が降っていた" in t for t in texts)
 
 
+def test_manual_edit_kept_per_row_within_changed_paragraph(tmp_path, fake_emotion):
+    out = tmp_path / "book"
+    out.mkdir()
+    cfg = make_cfg(tmp_path)
+    pipeline.build_script(NOVEL, cfg, out)
+    script = out / "script.tsv"
+    rows = pipeline.load_script(script)
+    assert (0, 0, 1) in rows
+    rows[(0, 0, 1)]["text"] = "手直し済み"
+    pipeline.write_script(script, [r for _, r in sorted(rows.items())])
+
+    changed = tmp_path / "changed.txt"
+    changed.write_text(read_text(NOVEL).replace("雨が降っていた。", "雨が止んでいた。"), encoding="utf-8")
+    pipeline.build_script(changed, cfg, out)
+    saved = pipeline.load_script(script)
+    assert saved[(0, 0, 1)]["text"] == "手直し済み"
+    assert saved[(0, 0, 0)]["source"] == "雨が止んでいた。"
+    assert any("雨が止んでいた" in t for t in fake_emotion.annotated_texts)
+
+
 def test_reannotate_discards_manual_edit(tmp_path, fake_emotion):
     out = tmp_path / "book"
     out.mkdir()
@@ -425,6 +445,25 @@ def test_signature_depends_on_paragraph_layout(book):
     moved = [dict(r, para=int(r["para"]) + 1) for r in ch]
     synth = FakeSynth(out / "segments")
     assert pipeline.chapter_signature(ch, cfg, synth) != pipeline.chapter_signature(moved, cfg, synth)
+
+
+def test_stale_full_wav_is_removed(book):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    first = pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    assert first.full_path is not None and first.full_path.exists()
+    edited = [dict(r, text=r["text"] + "あ") if int(r["chapter"]) == 1 else r for r in rows]
+    res = pipeline.synthesize_book(edited, titles, cfg, out, synth, chapters={1})
+    assert res.full_path is None
+    assert not first.full_path.exists()
+
+
+def test_stale_full_wav_is_removed_on_stop(book):
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    first = pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    res = pipeline.synthesize_book(rows, titles, cfg, out, synth, should_stop=lambda: True)
+    assert res.stopped and not first.full_path.exists()
 
 
 def test_synthesize_book_should_stop(book):
