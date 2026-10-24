@@ -126,6 +126,10 @@ def _build(cls, data: dict[str, Any]):
     if unknown:
         raise ValueError(f"{cls.__name__}: 不明な設定キー {sorted(unknown)}")
     kwargs = dict(data)
+    if cls is SplitConfig and "max_chars" in kwargs:
+        n = kwargs["max_chars"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ValueError("Config: split.max_chars は 1 以上の整数にしてください")
     if cls is Config:
         for key, sub in _SECTIONS.items():
             if key in kwargs:

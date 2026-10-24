@@ -121,3 +121,24 @@ def test_句読点も絵文字も無い長文の分割が速い():
     assert "".join(parts) == text
     assert all(len(p) <= 40 for p in parts)
     assert elapsed < 0.5, f"{elapsed:.2f}秒"
+
+
+def test_max_chars_が_0_以下なら分割は拒否する():
+    import signal
+
+    import pytest
+
+    from irodori_speaker.text_splitter import split_sentences
+
+    def timeout(*_):
+        raise AssertionError("分割が止まらない")
+
+    old = signal.signal(signal.SIGALRM, timeout)
+    signal.alarm(2)
+    try:
+        for n in (0, -1):
+            with pytest.raises(ValueError, match="max_chars"):
+                split_sentences("あ" * 100, max_chars=n)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)

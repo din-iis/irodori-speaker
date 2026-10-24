@@ -148,6 +148,8 @@ def _split_long(sentence: str, max_chars: int) -> list[str]:
 
 
 def _split_long_raw(sentence: str, max_chars: int) -> list[str]:
+    if max_chars <= 0:
+        raise ValueError("split.max_chars は 1 以上にしてください")
     if len(sentence) <= max_chars:
         return [sentence]
     # まず括弧内も含めた句点で、次に読点で、最後に文字数で割る

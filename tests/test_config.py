@@ -57,3 +57,11 @@ def test_server_command_is_list(tmp_path):
     p.write_text('llm:\n  server_command: ["llama-server", "--port", "8080"]\n', encoding="utf-8")
     cfg = load_config(p)
     assert cfg.llm.server_command == ["llama-server", "--port", "8080"]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", "'40'", "1.5"])
+def test_max_chars_は_1_以上の整数でなければ拒否する(tmp_path, value):
+    p = tmp_path / "c.yaml"
+    p.write_text(f"split:\n  max_chars: {value}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="max_chars"):
+        load_config(p)
