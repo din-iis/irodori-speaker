@@ -49,20 +49,20 @@ def latent_key_for(cfg: Config, voice_key: str) -> str:
 
 
 # モデルに渡す文字列の加工規則。変えると文のキャッシュと章 WAV の署名が作り直しになる
-TEXT_RULE = "strip-final-period-v1"
+TEXT_RULE = "strip-final-punct-v2"
 
 _CLOSERS = "」』）)】"
-_FINAL_PERIODS = "。．"
+_FINAL_PUNCT = "。．、，,"
 
 
 def tts_text(text: str) -> str:
-    """文末の句点（閉じ括弧の直前を含む）を外す。句点で終わると文末に余計な音が入るため。"""
+    """文末の句点・読点（閉じ括弧の直前を含む）を外す。これらで終わると文末に余計な音が入るため。"""
     body = text.rstrip()
     tail = ""
     while body and body[-1] in _CLOSERS:
         tail = body[-1] + tail
         body = body[:-1]
-    stripped = body.rstrip(_FINAL_PERIODS)
+    stripped = body.rstrip(_FINAL_PUNCT)
     if not stripped.strip():
         return text
     return stripped + tail
