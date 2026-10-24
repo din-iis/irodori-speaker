@@ -93,13 +93,21 @@ def build_script(
         ),
         encoding="utf-8",
     )
+    all_idx = {c.idx for c in built}
     if chapters is not None:
         built = [c for c in built if c.idx + 1 in chapters]
     if not built:
         raise ValueError("対象の章がありません")
     if llm_overrides:
         cfg = replace(cfg, llm=replace(cfg.llm, **llm_overrides))
-    return annotate_chapters(built, cfg, out_dir, use_emotion, reannotate=reannotate, progress=progress)
+    rows = annotate_chapters(built, cfg, out_dir, use_emotion, reannotate=reannotate, progress=progress)
+    # 小説から削除された章の行は残さない（章の絞り込みの有無にかかわらず）
+    script_path = out_dir / "script.tsv"
+    existing = load_script(script_path)
+    stale = [k for k in existing if k[0] not in all_idx]
+    if stale:
+        write_script(script_path, [r for k, r in sorted(existing.items()) if k[0] in all_idx])
+    return rows
 
 
 def annotate_chapters(
@@ -147,7 +155,11 @@ def annotate_chapters(
         with LLMServer(cfg.llm):
             annotator = LLMAnnotator(cfg.llm, out_dir / "annotations.jsonl")
             try:
-                results = annotator.annotate_many([plan[i][:3] for i in pending])
+                results = annotator.annotate_many(
+                    [plan[i][:3] for i in pending],
+                    progress=lambda done, _total: progress
+                    and progress(done, total, "LLM で感情を推定中 …"),
+                )
             finally:
                 annotator.unload()
         for i, para_anns in zip(pending, results):
@@ -163,6 +175,8 @@ def annotate_chapters(
                 rows.append(_row(s, labels_to_str(anns), text))
             annotated[i] = rows
 
+    # LLM の段落は annotate_many の進捗で数え済み。残りの段落をここで加算する
+    counted = len(annotated)
     rows: list[dict] = []
     for i, (segs, _, _, kept) in enumerate(plan):
         if kept:
@@ -171,13 +185,15 @@ def annotate_chapters(
             rows.extend(annotated[i])
         else:
             rows.extend(neutral_row(s) for s in segs)
-        if progress:
-            progress(i + 1, total, f"章 {segs[0].chapter_idx + 1} / 段落 {segs[0].para_idx + 1}")
+        if progress and i not in annotated:
+            counted += 1
+            progress(counted, total, f"章 {segs[0].chapter_idx + 1} / 段落 {segs[0].para_idx + 1}")
 
-    # --chapters で一部の章だけ処理した場合に、他の章の行（手修正を含む）を消さない
+    # --chapters で一部の章だけ処理した場合に、処理対象外の章の行（手修正を含む）を消さない。
+    # 処理した章では今回存在しない行（小説から削除した文）を残さない
+    processed = {c.idx for c in chapters}
     existing = load_script(script_path)
-    current = {(int(r["chapter"]), int(r["para"]), int(r["seg"])) for r in rows}
-    others = [r for k, r in existing.items() if k not in current]
+    others = [r for r in existing.values() if int(r["chapter"]) not in processed]
     merged = sorted(rows + others, key=lambda r: (int(r["chapter"]), int(r["para"]), int(r["seg"])))
     write_script(script_path, merged)
     return rows

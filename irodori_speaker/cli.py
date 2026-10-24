@@ -114,6 +114,9 @@ def _run_synth(args, cfg: Config, out_dir: Path) -> int:
         except ImportError as e:
             print(TTS_MISSING.format(err=e))
             return 2
+        except (RuntimeError, ValueError) as e:
+            print(e)
+            return 1
     if not result.chapter_files:
         print("対象の章がありません")
         return 1

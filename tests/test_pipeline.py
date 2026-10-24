@@ -67,15 +67,17 @@ def fake_emotion(monkeypatch):
         def __init__(self, cfg, cache_path):
             rec.llm_models.append(cfg.model)
 
-        def annotate_many(self, items):
+        def annotate_many(self, items, progress=None):
             rec.annotate_calls.append(items)
             result = []
-            for segs, _prev, _nxt in items:
+            for n, (segs, _prev, _nxt) in enumerate(items, 1):
                 para = []
                 for s in segs:
                     a = Annotation("happy", 2) if s.kind == "dialogue" else Annotation("neutral", 1)
                     para.append([a for _ in split_clauses(s.text)])
                 result.append(para)
+                if progress:
+                    progress(n, len(items))
             return result
 
         def unload(self):
@@ -283,6 +285,46 @@ def test_annotate_progress_per_paragraph(tmp_path, fake_emotion):
     assert calls[-1] == (total, total) and len(calls) == total
 
 
+def test_removed_sentence_is_dropped_from_script(tmp_path, fake_emotion):
+    out = tmp_path / "book"
+    out.mkdir()
+    cfg = make_cfg(tmp_path)
+    pipeline.build_script(NOVEL, cfg, out, use_emotion=False)
+    before = pipeline.load_script(out / "script.tsv")
+    changed = tmp_path / "changed.txt"
+    changed.write_text(read_text(NOVEL).replace("雨が降っていた。窓の外では、街がぼんやりと霞んでいる。", "雨が降っていた。"), encoding="utf-8")
+    new_rows = pipeline.build_script(changed, cfg, out, use_emotion=False)
+    after = pipeline.load_script(out / "script.tsv")
+    assert len(after) < len(before)
+    assert set(after) == {(int(r["chapter"]), int(r["para"]), int(r["seg"])) for r in new_rows}
+
+
+def test_removed_chapter_is_dropped_on_full_run(tmp_path, fake_emotion):
+    out = tmp_path / "book"
+    out.mkdir()
+    cfg = make_cfg(tmp_path)
+    pipeline.build_script(NOVEL, cfg, out, use_emotion=False)
+    changed = tmp_path / "changed.txt"
+    changed.write_text(read_text(NOVEL).split("第二章")[0], encoding="utf-8")
+    pipeline.build_script(changed, cfg, out, use_emotion=False)
+    assert {k[0] for k in pipeline.load_script(out / "script.tsv")} == {0}
+
+
+def test_llm_progress_is_reported_per_paragraph(tmp_path, fake_emotion):
+    out = tmp_path / "book"
+    out.mkdir()
+    cfg = make_cfg(tmp_path)
+    chapters = build_chapters(read_text(NOVEL), cfg.split.chapter_regex, cfg.split.max_chars)
+    total = sum(len(c.paragraphs) for c in chapters)
+    calls = []
+    pipeline.build_script(NOVEL, cfg, out, progress=lambda d, t, m: calls.append((d, t, m)))
+    dones = [d for d, _, _ in calls]
+    assert len(calls) == total
+    assert dones == sorted(dones) and len(set(dones)) == total and dones[-1] == total
+    assert all(t == total for _, t, _ in calls)
+    assert "LLM" in calls[0][2]
+
+
 # ---------- load_book ----------
 
 
@@ -408,6 +450,19 @@ def test_cli_synth_without_voice(tmp_path, capsys):
     cli.main(["script", str(NOVEL), "-c", str(cfg), "--no-emotion"])
     assert cli.main(["synth", str(NOVEL), "-c", str(cfg)]) == 1
     assert "voice" in capsys.readouterr().out
+
+
+def test_cli_synth_runtime_error_returns_1(tmp_path, monkeypatch, capsys):
+    cfg = write_cfg(tmp_path)
+    cli.main(["script", str(NOVEL), "-c", str(cfg), "--no-emotion"])
+
+    class Failing(FakeSynth):
+        def synthesize(self, text, force=False):
+            raise RuntimeError("空き VRAM が足りません")
+
+    monkeypatch.setattr(cli, "_make_synthesizer", lambda cfg, out_dir, voice, checkpoint: Failing(out_dir / "segments"))
+    assert cli.main(["synth", str(NOVEL), "-c", str(cfg)]) == 1
+    assert "空き VRAM が足りません" in capsys.readouterr().out
 
 
 def test_cli_run_no_emotion(tmp_path, monkeypatch):
