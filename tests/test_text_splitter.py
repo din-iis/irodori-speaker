@@ -107,3 +107,17 @@ def test_文字数での分割は絵文字の連なりを切らない():
         assert not any(p.endswith("‍") for p in parts)
         for p in parts:
             assert emoji[0] not in p or emoji in p  # 連なりの片割れだけの断片が無い
+
+
+def test_句読点も絵文字も無い長文の分割が速い():
+    import time
+
+    from irodori_speaker.text_splitter import split_sentences
+
+    text = "あ" * 4000
+    t0 = time.perf_counter()
+    parts = split_sentences(text, max_chars=40)
+    elapsed = time.perf_counter() - t0
+    assert "".join(parts) == text
+    assert all(len(p) <= 40 for p in parts)
+    assert elapsed < 0.5, f"{elapsed:.2f}秒"

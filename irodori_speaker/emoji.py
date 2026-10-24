@@ -27,6 +27,7 @@ def _forms() -> list[str]:
 
 
 _FORMS = _forms()
+_FIRST_CHARS = frozenset(f[0] for f in _FORMS)
 
 
 def emoji_runs(text: str) -> list[tuple[int, int]]:
@@ -35,6 +36,12 @@ def emoji_runs(text: str) -> list[tuple[int, int]]:
     start = None
     i = 0
     while i < len(text):
+        if text[i] not in _FIRST_CHARS:
+            if start is not None:
+                runs.append((start, i))
+                start = None
+            i += 1
+            continue
         for form in _FORMS:
             if text.startswith(form, i):
                 if start is None:
@@ -51,9 +58,12 @@ def emoji_runs(text: str) -> list[tuple[int, int]]:
     return runs
 
 
-def safe_cut(text: str, pos: int) -> int:
-    """pos が絵文字の連なりの内側なら、連なりの前（先頭の連なりなら後ろ）に切断位置を寄せる。"""
-    for start, end in emoji_runs(text):
+def safe_cut(text: str, pos: int, runs: list[tuple[int, int]] | None = None) -> int:
+    """pos が絵文字の連なりの内側なら、連なりの前（先頭の連なりなら後ろ）に切断位置を寄せる。
+
+    runs に emoji_runs(text) の結果を渡すと、繰り返し呼ぶときに全文の走査を省ける。
+    """
+    for start, end in emoji_runs(text) if runs is None else runs:
         if start < pos < end:
             return start if start > 0 else end
     return pos

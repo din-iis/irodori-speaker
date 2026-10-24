@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .emoji import safe_cut
+from .emoji import emoji_runs, safe_cut
 
 OPEN_BRACKETS = "「『（(【"
 CLOSE_BRACKETS = "」』）)】"
@@ -158,12 +158,13 @@ def _split_long_raw(sentence: str, max_chars: int) -> list[str]:
             for p in _pack(parts, max_chars):
                 out.extend(_split_long_raw(p, max_chars) if len(p) > max_chars and p != sentence else [p])
             return out
+    runs = emoji_runs(sentence)
     out = []
     i = 0
     while i < len(sentence):
         j = min(i + max_chars, len(sentence))
         if j < len(sentence):
-            cut = safe_cut(sentence, j)  # 絵文字の連なりの途中で切らない
+            cut = safe_cut(sentence, j, runs)  # 絵文字の連なりの途中で切らない
             if i < cut <= i + max_chars:
                 j = cut
         out.append(sentence[i:j])

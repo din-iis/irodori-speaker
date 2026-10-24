@@ -55,3 +55,9 @@ def test_既定の感情絵文字はすべて_Irodori_の絵文字():
 
 def test_IRODORI_EMOJI_は45種():
     assert len(IRODORI_EMOJI) == 45
+
+
+@pytest.mark.parametrize("pos", [0, 2, 3, 4, 5, 6, 7])
+def test_safe_cut_は_runs_を渡しても同じ結果(pos):
+    text = "あああ😠😠い"
+    assert safe_cut(text, pos, emoji_runs(text)) == safe_cut(text, pos)
