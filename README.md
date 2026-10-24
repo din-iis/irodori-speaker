@@ -1,7 +1,283 @@
 # irodori-speaker
 
-小説のテキストファイルを [Irodori-TTS](https://github.com/Aratako/Irodori-TTS) で読み上げます。声は参照音声から作り、感情はローカル LLM が句ごとに推定して絵文字で与えます。
+小説のテキストファイルを、[Irodori-TTS](https://github.com/Aratako/Irodori-TTS)（日本語特化のオープンソース TTS）で読み上げます。
+声は参照音声（ゼロショットの声クローン）から作り、感情はローカル LLM（Ollama）が句ごとに推定して、Irodori-TTS が解釈する絵文字として本文に挿入します。
 
-設計: `docs/superpowers/specs/2026-10-24-irodori-speaker-design.md`
+- 合成は GPU マシン（Windows + WSL2、RTX 3060 Ti 8GB を想定）で行います。Mac は開発・テストと、LLM だけを使う `script` ステップ用です。
+- 設計: `docs/superpowers/specs/2026-10-24-irodori-speaker-design.md`
 
-（セットアップと使い方は実装後に追記）
+## 仕組み
+
+処理は独立した 2 つのステップに分かれています。
+
+1. **台本（`script`）**: 小説を章・段落・文に分け、LLM が句ごとの感情を推定して、絵文字入りの読み上げ本文を `script.tsv` に書き出します。LLM だけを使い、torch は要りません。終わると LLM を VRAM から解放します。
+2. **音声化（`synth`）**: `script.tsv` の `text` 列を文ごとに Irodori-TTS で合成し、章ごとの WAV と全体の WAV に結合します。TTS だけを使い、LLM には接続しません。
+
+`run` は 1 → 2 を続けて実行します。8GB の GPU には LLM と TTS を同時に載せられないので、台本を作り終えて LLM を解放してから TTS を読み込みます。2 つを分けてあるので、台本を手で直してから音声化できます。
+
+### 句読点ごとの絵文字
+
+Irodori-TTS は、本文中の絵文字（😊 😠 👂 など）で演技を制御します。文頭に 1 個だけ置くのではなく、**句読点（「、。！？…」）で区切った句ごとに**感情を推定して絵文字を置きます。
+
+```
+入力:   「やった！ついに見つけたぞ！！」
+台本:   「😲やった！😆ついに見つけたぞ！！
+```
+
+（実際の絵文字は LLM の推定と `emotion_emoji` の表で決まります。上は例です。）
+
+- 感情は 10 種（neutral / happy / sad / angry / surprised / fearful / tender / whisper / excited / serious）× 強度 1〜3 です。`emotion_emoji` の表で絵文字に変換します。強度 1 は絵文字なしです。
+- 地の文は強度を `narration_intensity_shift`（既定 1）だけ下げます。地の文はほぼ素の朗読になり、台詞に感情が乗ります。
+- 絵文字は句の先頭（句が「『（で始まるなら開き括弧の直後）に置きます。同じ文の中で直前の句と絵文字が同じなら置きません。文は別々に合成するので、文の先頭の句には必ず置きます。
+- この配置は本ツールの仮定です（上流の絵文字の説明は配置ルールを定めていません）。効きは WebUI の「感情プリセット総当たり」で確かめてください。
+
+## セットアップ
+
+### GPU マシン（合成）
+
+前提: Windows + WSL2（Ubuntu など）、NVIDIA GPU（CUDA 12.8 対応のドライバー）、[uv](https://docs.astral.sh/uv/)。
+
+```bash
+# 1. FFmpeg（torchcodec が必要とする）
+sudo apt install ffmpeg
+
+# 2. 依存関係（Mac と同じ uv.lock のコミットを使うため --frozen）
+uv sync --frozen --extra tts --extra cu128 --extra webui
+
+# 3. WSL2 側に Ollama と LLM（Q8_0 で約 5.2GB）
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3.5:4b-q8_0
+
+# 4. 設定
+cp config.example.yaml config.yaml    # voice などを編集
+```
+
+以後は `uv run --no-sync python -m irodori_speaker ...` で実行します（`--no-sync` を付けると、`uv run` が環境を同期し直さず、上で入れた GPU 用の torch をそのまま使います）。
+
+初回の合成時に、Irodori-TTS のチェックポイントとコーデック（`Aratako/Semantic-DACVAE-Japanese-32dim`）を Hugging Face から自動でダウンロードします。
+
+### 参照音声（声）の置き方
+
+`voices/` に参照音声を置き、`config.yaml` の `voice` で選びます。次のどちらでも構いません。
+
+```
+voices/narrator.wav          # 1 ファイル → voice: narrator
+voices/narrator/             # フォルダ内の複数クリップ → voice: narrator
+  01.wav                     #   名前順に連結して 1 つの声にする
+  02.wav
+```
+
+- 対応する拡張子: `.wav .flac .mp3 .m4a .ogg .opus .aac .webm`
+- 1 つの声で地の文も台詞も全部読みます（登場人物ごとの声の割り当ては未対応です）。
+- 参照音声は初回の合成で一度だけ潜在表現（`out/.voices/<sha1>.pt`）に変換してキャッシュします。ファイル名と中身が同じなら、`voices/` を rsync し直してもキャッシュは有効です。
+- `voices/` の中身は git に入れません（`.gitignore` 済み）。GPU マシンに直接置くか、rsync で送ってください。
+
+### Mac（開発・テスト）
+
+Mac には torch も GPU も入れません。`script` ステップ（Ollama があれば LLM 付きで、無ければ `--no-emotion`）とテストが動きます。
+
+```bash
+uv sync --extra dev
+uv run pytest -q
+```
+
+WebUI の画面だけ確認するなら（生成はできません）:
+
+```bash
+uv run --with gradio python -m irodori_speaker.webui
+```
+
+## 使い方（CLI）
+
+どのサブコマンドも `novel.txt` を受け取り、作業ディレクトリは `out/<novel の拡張子を除いた名前>/` です。順に実行してください。
+
+```bash
+# 1. 台本: 分割 + 句ごとの感情 → out/<book>/script.tsv, chapters.json
+uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml
+
+# （script.tsv の text 列を手で直す）
+
+# 2. 音声化: script.tsv → 章ごとの WAV と全体の WAV
+uv run --no-sync python -m irodori_speaker synth novel.txt -c config.yaml
+
+# 一括: 1 → 2 を続けて実行（間で LLM を解放してから TTS を読み込む）
+uv run --no-sync python -m irodori_speaker run novel.txt -c config.yaml
+```
+
+`script` は先頭に「N 章 / N 段落 / N 文」を、`synth` は使う声（クリップ数と合計秒数）を表示し、終了時に `warnings.log` の件数を表示します。
+
+### オプション
+
+共通（`script` / `synth` / `run`）:
+
+| オプション | 内容 |
+|---|---|
+| `-c`, `--config` | 設定 YAML。省略すると組み込みの既定値 |
+| `--chapters 1-3,5` | 対象の章（1 始まり） |
+
+`script` と `run`:
+
+| オプション | 内容 |
+|---|---|
+| `--no-emotion` | LLM を使わず全て neutral にする（`text` = 原文）。Mac で LLM なしに動かすときに使う |
+| `--reannotate` | script.tsv の手直しを捨てて、感情と絵文字を作り直す |
+| `--llm-model NAME` | LLM のモデル名（config の `llm.model` を上書き） |
+| `--think` | LLM の思考モードを有効にする（精度は上がるかもしれないが数倍遅い） |
+
+`synth` と `run`:
+
+| オプション | 内容 |
+|---|---|
+| `--force` | 合成済みの文も作り直す |
+| `--voice ID` | 声の ID（config の `voice` を上書き）。`voices/` 内の ID のほか、ファイルやフォルダのパスも指定できる |
+| `--checkpoint ID` | TTS のチェックポイント（config の `checkpoint` を上書き） |
+
+```bash
+# 例: 1〜3 章だけ台本を作る / 別の LLM を使う / 声を変えて作り直す
+uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml --chapters 1-3
+uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml --llm-model qwen3.5:4b-q4_K_M
+uv run --no-sync python -m irodori_speaker synth novel.txt -c config.yaml --voice narrator2 --force
+```
+
+`--help` で各サブコマンドのオプションを確認できます。
+
+### 出力
+
+```
+out/
+  .voices/<sha1>.pt            参照音声の潜在表現のキャッシュ
+  <book>/
+    chapters.json              章のタイトル（script が書き、synth が読む）
+    script.tsv                 台本。手で直すと次回の音声化に反映される
+    annotations.jsonl          LLM の推定結果のキャッシュ（成功した段落のみ）
+    segments/<sha1>.wav        文ごとの合成結果のキャッシュ（途中で止めても続きから再開できる）
+    warnings.log               合成時の警告（文が長すぎて切り詰められた等）
+    chapters/NN_タイトル.wav   章ごとの WAV
+    <book>_full.wav            全体の WAV
+```
+
+`--chapters` で一部の章だけ合成したときは、全章の WAV が揃っていて台本と一致している場合にだけ `<book>_full.wav` を作ります。揃っていなければ古い通し WAV は削除されます。
+
+### script.tsv を手直しする
+
+`script.tsv` はタブ区切りで、列は次のとおりです。
+
+| 列 | 内容 |
+|---|---|
+| `chapter` / `para` / `seg` | 章・段落・文の番号（0 始まり）。行のキー |
+| `kind` | `narration`（地の文）か `dialogue`（台詞） |
+| `labels` | 句ごとの `感情:強度` を `\|` で並べた参考情報（例: `happy:2\|neutral:1`）。音声には使われない |
+| `text` | **絵文字入りの読み上げ本文。手直しはここで行う** |
+| `source` | 分割直後の原文。小説本文との一致判定に使うので**編集しない** |
+
+`text` 列では、絵文字の移動・削除・追加と、読み仮名の修正ができます。直したら `synth` を再実行すると、**直した文だけ**が再合成されます（文ごとのキャッシュは `text` を含むキーで引くため）。
+
+**手直しが正です。** `script` を再実行しても、`source` が小説本文と一致する行は、保存済みの `labels` と `text` をそのまま使います（絵文字を作り直さず、段落の全行が一致するなら LLM も呼びません）。小説本文を直した文だけが再推定されます。`--chapters` で一部の章だけ処理しても、他の章の行は残ります。
+
+`emotion_emoji` の表を変えて、その結果を台本に反映したいときは `--reannotate` を付けます。手直しを捨てて、感情と絵文字を作り直します。LLM の推定は `annotations.jsonl` にキャッシュされているので、LLM を呼ぶのはキャッシュに無い段落だけです。
+
+```bash
+uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml --reannotate
+```
+
+## WebUI
+
+試聴（短い文で声・絵文字・パラメータを確認）と、小説全体の生成の両方に使えます。GPU マシンで起動し、Mac のブラウザから開きます。
+
+```bash
+uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0    # 既定のポートは 7860
+```
+
+Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます。`--host` と `--port` を省略すると `127.0.0.1:7860` です。
+
+- **TTS 設定**（画面上部）: チェックポイント（候補から選ぶか、自由入力）、device / precision、声（一覧の更新と、音声のアップロード → `voices/<id>.wav` に保存）、「モデル読み込み」ボタン、状態欄。
+- **LLM 設定**（折りたたみ）: api（ollama / openai）、base_url、モデル、思考モード、並列数。ここでの値は config の `llm` を上書きして台本作成に使います。モデルは「一覧を取得」ボタンで、サーバーにあるモデルから選べます（Ollama は `ollama list` と同じ一覧）。一覧に無いモデル名も自由入力できます。
+- **タブ「試聴」**: 本文を入れて「生成」を押すと、音声と使用した seed・所要時間が出ます。絵文字パレットまたは感情プリセットから絵文字を挿入でき、「LLM で付ける」で本文に句ごとの絵文字を付けられます。「感情プリセット総当たり」は、同じ seed で 10 感情を生成して聞き比べるためのボタンで、`emotion_emoji` の調整に使います。
+- **タブ「小説生成」**: 小説ファイル、章の範囲、オプション（感情を付けない / 感情を作り直す / 作り直す）を指定して、次の 3 つのボタンを**それぞれ独立に**押せます。
+  1. **台本を作る**: `script` と同じ処理。結果は表に出ます。`text` 列は表の上で編集でき、「script.tsv を保存」で書き戻します。
+  2. **音声にする**: 表の編集を保存してから `synth` と同じ処理を行い、完了後に章ごとの WAV と全体の WAV を表示します。台本が無ければ案内を出して止まります。空き VRAM が足りなければ状態欄に案内が出ます。
+  3. **一括実行**: 1 → 2 を続けて実行します。
+  - 「停止」ボタンで中断できます。文ごとにキャッシュしているので、再開すると続きから進みます。
+
+## 設定
+
+`config.example.yaml` をコピーして `config.yaml` を作ります（`config.yaml` は git に入れません）。主なキーは次のとおりです。
+
+| キー | 既定値 | 内容 |
+|---|---|---|
+| `checkpoint` | `Aratako/Irodori-TTS-v4.1-Small` | Hugging Face の ID / ID + サブフォルダ / ローカルの `.safetensors` |
+| `codec_repo` | `Aratako/Semantic-DACVAE-Japanese-32dim` | コーデック |
+| `device` / `precision` | `cuda` / `bf16` | `cuda`・`mps`・`cpu` と `fp32`・`bf16`。CUDA は bf16 が速く VRAM も半分 |
+| `min_free_vram_gb` | `3.0` | TTS を読み込む前の空き VRAM の下限。足りなければ LLM の停止を案内して止まる（`0` で無効） |
+| `empty_cache_interval` | `10` | N 文ごとに `torch.cuda.empty_cache()`（`0` で無効） |
+| `voices_dir` / `voice` | `voices` / `narrator` | 参照音声の置き場所と、使う声の ID |
+| `ref_normalize_db` | `-16.0` | 参照音声のラウドネス正規化（`null` で無効） |
+| `max_ref_seconds` | `null` | 参照音声の上限秒数。`null` はチェックポイントの既定（v4 は 120 秒） |
+| `sampling.*` | | `num_steps`・`cfg_scale_text`（3.0）・`cfg_scale_speaker`（5.0）・`duration_scale`・`t_schedule_mode`・`sway_coeff`・`max_seconds`（30.0）・`seed`（42） |
+| `emotion_mode` | `emoji` | `emoji` か `none`（`none` は LLM を使わない） |
+| `narration_intensity_shift` | `1` | 地の文の強度を下げる量 |
+| `emotion_emoji` | | 感情 × 強度（1/2/3）→ 挿入する絵文字。空文字は挿入なし。要素は必ず 3 つ |
+| `llm.*` | | 下記 |
+| `split.max_chars` | `80` | 1 文の最大文字数。`sampling.max_seconds`（30 秒）に収まる長さに合わせる |
+| `split.chapter_regex` | 「第N章/話/節」「プロローグ」「エピローグ」 | 章の見出しの正規表現。見出しが無ければ全体を 1 章にする |
+| `silence.*` | 文 0.25 / 段落 0.6 / 章 1.0 | 結合時に挟む無音（秒） |
+| `output_dir` | `out` | 出力先 |
+
+- 設定キーの綴りを間違えると、起動時にエラーで止まります（不明なキーは無視されません）。
+- `sampling.seed` は固定を勧めます（`null` だと文ごとに声がぶれます）。
+- `sampling` の値・`checkpoint`・参照音声・文の本文のどれかを変えると、文ごとのキャッシュのキーが変わり、自動で作り直しになります。`device` と `precision` はキーに含まれません。
+
+### 8GB で OOM になるとき
+
+`precision: bf16` で OOM になる場合は、int8 版のチェックポイントに切り替えます。
+
+```yaml
+checkpoint: Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-weight-only
+```
+
+また、Ollama を止め忘れて空き VRAM が足りないときは、`synth` の読み込み前に案内が出て止まります。`ollama stop <モデル名>` で解放してから再実行してください。
+
+### LLM を選ぶ・切り替える
+
+既定は Ollama の `qwen3.5:4b-q8_0`（約 5.2GB、思考モード無効）です。日本語 LLM の評価（Nejumi Leaderboard 4）で 10B 未満のモデルの中では上位で、Q8_0 なら 8GB に載ります。軽くしたいときは `qwen3.5:4b-q4_K_M`（約 3.3GB）にします。`script --llm-model NAME` か WebUI の LLM 設定でも切り替えられます。
+
+Ollama の代わりに llama-server / vLLM / LM Studio を使うときは、`llm.api: openai` にして `base_url` を OpenAI 互換の `/v1` に向けます。
+
+```yaml
+llm:
+  api: openai
+  base_url: http://localhost:8080/v1
+  model: Qwen3.5-4B-Q8_0
+  # server_command を書くと、台本作成の前にツールが起動し、終わったら停止する
+  server_command: ["llama-server", "-m", "models/Qwen3.5-4B-Q8_0.gguf", "-ngl", "99", "-c", "16384", "-np", "4", "--port", "8080"]
+  concurrency: 4          # llama-server の -np に合わせる
+```
+
+- `server_command` を省略すると、起動済みのサーバーを使います（停止もしません）。指定してサーバーがすでに応答していれば、起動しません。
+- 注釈が終わるとモデルを解放します（`llm.unload: true`）。Ollama は `keep_alive: 0` を送り、`openai` は `server_command` で起動したサーバーを停止します。
+- `llm.api_key` を指定すると `Authorization: Bearer` ヘッダーを付けます。
+
+## 声の作り方
+
+- 参照音声は、**複数の短いクリップで合計 30 秒程度**が推奨です（上限は 120 秒）。長すぎる 1 ファイルより、雑音の無い短いクリップを数本そろえるほうが安定します。
+- クリップは `voices/<id>/` に入れると名前順に連結されます。順序を決めたいときは `01.wav`・`02.wav` のように番号を付けてください。
+- BGM・残響・複数人の声が混ざっていない、一定の調子で話した音声を選びます。
+- 日本語のみに対応しています。
+- 声を変えたら（ファイルの中身を差し替えたら）、参照音声の潜在表現と文ごとのキャッシュが自動で作り直されます。
+
+## 注意
+
+- **透かし**: 出力される音声には、上流の仕様で SilentCipher の透かしが入ります。
+- **声の同意**: 他人の声を、本人の同意なく複製しないでください（モデルカードの倫理規定）。参照音声には、自分の声か、利用許諾を得た声だけを使ってください。
+- **漢字の読み間違い**: 青空文庫形式のルビ（`|漢字《かんじ》`）で小説本文に読みを書くか、`script.tsv` の `text` 列を直してください。ルビは読み仮名に置き換えて読み上げます。青空文庫の注記（`［＃…］`）は取り除きます。
+- **8GB の制約**: LLM と TTS を同時に載せません。`script`（`run` の前半）の終了後に LLM を解放してから `synth` を行います。
+- 1 文は 80 文字までに再分割されます。長い文が 30 秒を超えて切り詰められたときは、`warnings.log` に記録されます。
+
+## テスト
+
+```bash
+uv sync --extra dev
+uv run pytest -q
+```
+
+テストは、LLM（Ollama）・TTS（torch / `irodori_tts`）・GPU を使わずに動きます。
