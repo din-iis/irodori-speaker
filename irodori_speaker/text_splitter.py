@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+OPEN_BRACKETS = "「『（(【"
+CLOSE_BRACKETS = "」』）)】"
+SENTENCE_END = "。！？!?"
+DIALOGUE_OPEN = "「『"
+
+_RUBY_EXPLICIT = re.compile(r"[|｜]([^《|｜]+)《([^》]+)》")
+_RUBY_KANJI = re.compile(r"([一-龥々〆ヶ]+)《([^》]+)》")
+_AOZORA_NOTE = re.compile(r"［＃[^］]*］")
+
+
+@dataclass
+class Segment:
+    chapter_idx: int  # 0 始まり
+    para_idx: int  # 章内の段落番号
+    seg_idx: int  # 段落内の文番号
+    kind: str  # "narration" | "dialogue"
+    text: str
+
+    @property
+    def key(self) -> tuple[int, int, int]:
+        return (self.chapter_idx, self.para_idx, self.seg_idx)
+
+
+@dataclass
+class Chapter:
+    idx: int
+    title: str
+    paragraphs: list[list[Segment]]
+
+
+def read_text(path: str | Path) -> str:
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp932")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def clean_text(text: str) -> str:
+    """青空文庫形式のルビ・注記を読み上げ用に整える。ルビは読み仮名に置き換える。"""
+    text = _AOZORA_NOTE.sub("", text)
+    text = _RUBY_EXPLICIT.sub(r"\2", text)
+    text = _RUBY_KANJI.sub(r"\2", text)
+    return text
+
+
+def split_chapters(text: str, chapter_regex: str) -> list[tuple[str, str]]:
+    """(タイトル, 本文) のリスト。見出しが無ければ全体を 1 章とする。"""
+    pattern = re.compile(chapter_regex, re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [("全編", text)]
+    chapters: list[tuple[str, str]] = []
+    head = text[: matches[0].start()]
+    if head.strip():
+        chapters.append(("序", head))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        title = m.group(0).strip()
+        chapters.append((title, text[m.end() : end]))
+    return chapters
+
+
+def split_paragraphs(body: str) -> list[str]:
+    return [line.strip() for line in body.split("\n") if line.strip()]
+
+
+def split_sentences(paragraph: str, max_chars: int = 120) -> list[str]:
+    """。！？の後で文を区切る。括弧の内側では区切らず、長すぎる文だけ再分割する。"""
+    sentences: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    i = 0
+    n = len(paragraph)
+    while i < n:
+        ch = paragraph[i]
+        buf.append(ch)
+        if ch in OPEN_BRACKETS:
+            depth += 1
+        elif ch in CLOSE_BRACKETS:
+            depth = max(0, depth - 1)
+            # 「A」「B」のように台詞が連続する場合は区切る
+            if depth == 0 and i + 1 < n and paragraph[i + 1] in DIALOGUE_OPEN:
+                sentences.append("".join(buf))
+                buf = []
+        elif ch in SENTENCE_END and depth == 0:
+            # 連続する句読点（！！、？！、…）と閉じ括弧を同じ文に含める
+            while i + 1 < n and (
+                paragraph[i + 1] in SENTENCE_END + "…" or paragraph[i + 1] in CLOSE_BRACKETS
+            ):
+                i += 1
+                buf.append(paragraph[i])
+            sentences.append("".join(buf))
+            buf = []
+        i += 1
+    if buf:
+        sentences.append("".join(buf))
+
+    result: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        result.extend(_split_long(s, max_chars))
+    return result
+
+
+def _split_long(sentence: str, max_chars: int) -> list[str]:
+    if len(sentence) <= max_chars:
+        return [sentence]
+    # まず括弧内も含めた句点で、次に読点で、最後に文字数で割る
+    for seps in (SENTENCE_END, "、,，"):
+        parts = _cut_after(sentence, seps)
+        if len(parts) > 1:
+            out: list[str] = []
+            for p in _pack(parts, max_chars):
+                out.extend(_split_long(p, max_chars) if len(p) > max_chars and p != sentence else [p])
+            return out
+    return [sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)]
+
+
+def _cut_after(text: str, seps: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    for ch in text:
+        buf.append(ch)
+        if ch in seps:
+            parts.append("".join(buf))
+            buf = []
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
+def _pack(parts: list[str], max_chars: int) -> list[str]:
+    """短い断片を max_chars 以内でまとめ直す。"""
+    packed: list[str] = []
+    cur = ""
+    for p in parts:
+        if cur and len(cur) + len(p) > max_chars:
+            packed.append(cur)
+            cur = p
+        else:
+            cur += p
+    if cur:
+        packed.append(cur)
+    return packed
+
+
+def classify(sentence: str) -> str:
+    return "dialogue" if sentence[:1] in DIALOGUE_OPEN else "narration"
+
+
+def build_chapters(text: str, chapter_regex: str, max_chars: int = 120) -> list[Chapter]:
+    chapters: list[Chapter] = []
+    for c_idx, (title, body) in enumerate(split_chapters(clean_text(text), chapter_regex)):
+        paragraphs: list[list[Segment]] = []
+        for para in split_paragraphs(body):
+            p_idx = len(paragraphs)
+            segs = [
+                Segment(c_idx, p_idx, s_idx, classify(s), s)
+                for s_idx, s in enumerate(split_sentences(para, max_chars))
+            ]
+            if segs:
+                paragraphs.append(segs)
+        if paragraphs:
+            chapters.append(Chapter(c_idx, title, paragraphs))
+    return chapters

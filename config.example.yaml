@@ -1,0 +1,61 @@
+checkpoint: Aratako/Irodori-TTS-v4.1-Small   # HF id / HF id/サブフォルダ / ローカル .safetensors
+# 8GB で OOM になる場合: Aratako/Irodori-TTS-v4.1-Small-Quantized/int8-weight-only
+codec_repo: Aratako/Semantic-DACVAE-Japanese-32dim
+device: cuda            # cuda | mps | cpu（モデルとコーデックの両方）
+precision: bf16         # fp32 | bf16（CUDA は bf16 が速く VRAM も半分。mps/cpu は fp32）
+min_free_vram_gb: 3.0   # TTS 読み込み前の空き VRAM チェック（0 で無効）
+empty_cache_interval: 10  # N 文ごとに torch.cuda.empty_cache()（0 で無効）
+
+voices_dir: voices
+voice: narrator         # voices/narrator.wav か voices/narrator/ 内の複数クリップ（名前順に連結、合計 30 秒程度が推奨）
+ref_normalize_db: -16.0 # null で無効
+max_ref_seconds: null   # null = チェックポイント既定（v4 は 120 秒）
+
+sampling:
+  num_steps: null       # null = RF 40 / MeanFlow 4
+  t_schedule_mode: linear   # linear | sway
+  sway_coeff: -1.0
+  cfg_scale_text: 3.0
+  cfg_scale_speaker: 5.0
+  duration_scale: 1.0
+  max_seconds: 30.0     # 1 文の最大長。split.max_chars と合わせる
+  seed: 42              # null でランダム（文ごとに声がぶれるので固定推奨）
+
+emotion_mode: emoji     # emoji | none
+narration_intensity_shift: 1
+# 感情 × 強度(1/2/3) → 挿入する絵文字。空文字は挿入なし。Irodori の対応絵文字のみ効く
+emotion_emoji:
+  neutral:   ["", "", ""]
+  happy:     ["", "😊", "😆"]
+  sad:       ["", "😟", "😭"]
+  angry:     ["", "😠", "😠😠"]
+  surprised: ["", "😲", "😲😲"]
+  fearful:   ["", "😰", "😰😰"]
+  tender:    ["", "🫶", "🫶🫶"]
+  whisper:   ["", "👂", "👂👂"]
+  excited:   ["", "💥", "💥💥"]
+  serious:   ["", "", ""]
+
+llm:
+  api: ollama           # ollama: Ollama ネイティブ API / openai: OpenAI 互換（llama-server / vLLM / LM Studio）
+  base_url: http://localhost:11434      # openai のときは http://localhost:8080/v1 など
+  model: qwen3.5:4b-q8_0                # 8GB 向けの推奨。軽くするなら qwen3.5:4b-q4_K_M
+  think: false          # 思考モード。true は精度が上がる可能性があるが数倍遅い
+  api_key: null
+  timeout: 120
+  concurrency: 1        # Ollama は OLLAMA_NUM_PARALLEL、llama-server は -np に合わせる
+  unload: true          # 注釈後にモデルを解放する（ollama: keep_alive=0 / openai: server_command を終了）
+  # server_command:     # openai のとき、指定すると注釈の前に起動して /v1/models が応答するまで待ち、注釈後に終了させる
+  #   ["llama-server", "-m", "models/Qwen3.5-4B-Q8_0.gguf", "-ngl", "99", "-c", "16384", "-np", "4", "--port", "8080"]
+  server_start_timeout: 300
+
+split:
+  # chapter_regex: '^\s*第.+?[章話節].*$'
+  max_chars: 80
+
+silence:   # 秒
+  sentence: 0.25
+  paragraph: 0.6
+  chapter: 1.0
+
+output_dir: out

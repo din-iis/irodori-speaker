@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irodori-speaker"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = ["numpy", "soundfile", "requests", "pyyaml", "tqdm"]
+
+[project.optional-dependencies]
+tts = ["irodori-tts @ git+https://github.com/Aratako/Irodori-TTS.git",
+       "dacvae @ git+https://github.com/facebookresearch/dacvae",
+       "torch>=2.10.0,<2.11.0", "torchaudio>=2.10.0,<2.11.0"]
+cu128 = ["torch>=2.10.0,<2.11.0", "torchaudio>=2.10.0,<2.11.0", "torchao>=0.16.0,<0.17.0"]
+webui = ["gradio>=5.0.0"]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["irodori_speaker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+torchaudio = [{ index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
