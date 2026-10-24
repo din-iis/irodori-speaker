@@ -287,7 +287,9 @@ def _sig_path(chapter_wav: Path) -> Path:
 def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
     payload = [
         [spoken_text(r) for r in rows],
+        [(int(r["para"]), int(r["seg"])) for r in rows],
         asdict(cfg.sampling),
+        asdict(cfg.silence),
         cfg.checkpoint,
         getattr(synth, "latent_key", None),
     ]

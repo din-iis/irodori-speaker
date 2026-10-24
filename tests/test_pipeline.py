@@ -408,6 +408,25 @@ def test_stale_chapter_wav_is_not_joined(book):
     assert res2.full_path is not None and res2.stale_chapters == []
 
 
+def test_silence_change_makes_other_chapters_stale(book):
+    from dataclasses import replace
+
+    cfg, out, titles, rows = book
+    synth = FakeSynth(out / "segments")
+    pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    cfg2 = replace(cfg, silence=replace(cfg.silence, sentence=0.5))
+    res = pipeline.synthesize_book(rows, titles, cfg2, out, synth, chapters={1})
+    assert res.full_path is None and res.stale_chapters == [2]
+
+
+def test_signature_depends_on_paragraph_layout(book):
+    cfg, out, titles, rows = book
+    ch = [r for r in rows if int(r["chapter"]) == 0]
+    moved = [dict(r, para=int(r["para"]) + 1) for r in ch]
+    synth = FakeSynth(out / "segments")
+    assert pipeline.chapter_signature(ch, cfg, synth) != pipeline.chapter_signature(moved, cfg, synth)
+
+
 def test_synthesize_book_should_stop(book):
     cfg, out, titles, rows = book
     calls = {"n": 0}
@@ -488,6 +507,29 @@ def test_cli_synth_runtime_error_returns_1(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_make_synthesizer", lambda cfg, out_dir, voice, checkpoint: Failing(out_dir / "segments"))
     assert cli.main(["synth", str(NOVEL), "-c", str(cfg)]) == 1
     assert "空き VRAM が足りません" in capsys.readouterr().out
+
+
+def test_cli_synth_checkpoint_applies_to_whole_synthesis(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    cfg_path = write_cfg(tmp_path)
+    cli.main(["script", str(NOVEL), "-c", str(cfg_path), "--no-emotion"])
+    seen = []
+
+    def fake_make(cfg, out_dir, voice, checkpoint):
+        seen.append(cfg.checkpoint)
+        return FakeSynth(out_dir / "segments")
+
+    monkeypatch.setattr(cli, "_make_synthesizer", fake_make)
+    assert cli.main(["synth", str(NOVEL), "-c", str(cfg_path), "--checkpoint", "X"]) == 0
+    assert seen == ["X"]
+    out = tmp_path / "out" / "sample_novel"
+    titles, rows = pipeline.load_book(out)
+    cfg_x = replace(pipeline.Config(output_dir=str(tmp_path / "out")), checkpoint="X")
+    for idx in titles:
+        wav = next((out / "chapters").glob(f"{idx + 1:02d}_*.wav"))
+        expected = pipeline.chapter_signature([r for r in rows if int(r["chapter"]) == idx], cfg_x, FakeSynth(out))
+        assert wav.with_name(wav.name + ".sig").read_text(encoding="utf-8").strip() == expected
 
 
 def test_cli_run_no_emotion(tmp_path, monkeypatch):

@@ -28,8 +28,7 @@ def _make_synthesizer(cfg: Config, out_dir: Path, voice: str, checkpoint: str | 
     from .synth import Synthesizer
     from .voices import describe_voice, resolve_voice
 
-    if checkpoint:
-        cfg = replace(cfg, checkpoint=checkpoint)
+    # checkpoint の上書きは呼び出し側（_run_synth）が cfg に反映済み。引数は互換のため残す
     voice_paths = resolve_voice(Path(cfg.voices_dir), voice)
     print(f"使う声: {describe_voice(voice_paths)}")
     return Synthesizer(
@@ -80,6 +79,8 @@ def _run_script(args, cfg: Config, out_dir: Path) -> int:
 
 
 def _run_synth(args, cfg: Config, out_dir: Path) -> int:
+    if args.checkpoint:
+        cfg = replace(cfg, checkpoint=args.checkpoint)
     try:
         titles, rows = load_book(out_dir)
     except ValueError as e:
