@@ -95,12 +95,20 @@ def _runtime_key(cfg: Config, checkpoint: str | None = None):
 def load_runtime(cfg: Config, checkpoint: str | None = None):
     """上流のキャッシュから runtime を得る。キーが変わるときだけ VRAM を確認する。"""
     global _LOADED_KEY
-    from irodori_tts.inference_runtime import get_cached_runtime
+    from irodori_tts.inference_runtime import clear_cached_runtime, get_cached_runtime
 
     key = _runtime_key(cfg, checkpoint)
     if key != _LOADED_KEY:
+        if _LOADED_KEY is not None:
+            # 上流は新 runtime を作ってから旧を unload するので、先に解放して二重ロードと VRAM 不足の誤検知を避ける
+            clear_cached_runtime()
+            _LOADED_KEY = None
         check_vram(cfg)
-    runtime, _loaded_now = get_cached_runtime(key)
+    try:
+        runtime, _loaded_now = get_cached_runtime(key)
+    except BaseException:
+        _LOADED_KEY = None
+        raise
     _LOADED_KEY = key
     if not runtime.model_cfg.use_speaker_condition_resolved:
         raise ValueError("このチェックポイントは参照音声に対応していません")

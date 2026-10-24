@@ -287,7 +287,16 @@ def fake_upstream(monkeypatch, tmp_path):
     mod = types.ModuleType("irodori_tts.inference_runtime")
     mod.RuntimeKey = RuntimeKey
 
+    order = []
+
+    def clear_cached_runtime():
+        order.append("clear")
+        cache.clear()
+
+    mod.clear_cached_runtime = clear_cached_runtime
+
     def get_cached_runtime(key):
+        order.append("get")
         if key not in cache:
             cache.clear()  # 上流は key が変わると旧 runtime を unload する
             cache[key] = types.SimpleNamespace(
@@ -300,10 +309,12 @@ def fake_upstream(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "irodori_tts.inference_runtime", mod)
     monkeypatch.setattr(synth, "_LOADED_KEY", None, raising=False)
     vram_calls = []
-    monkeypatch.setattr(synth, "check_vram", lambda cfg: vram_calls.append(cfg.checkpoint))
+    monkeypatch.setattr(
+        synth, "check_vram", lambda cfg: (order.append("vram"), vram_calls.append(cfg.checkpoint))
+    )
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
-    return types.SimpleNamespace(vram_calls=vram_calls, ckpt=str(ckpt), tmp=tmp_path)
+    return types.SimpleNamespace(order=order, vram_calls=vram_calls, ckpt=str(ckpt), tmp=tmp_path)
 
 
 def _real_synth(fake, checkpoint=None, name="a"):
@@ -343,3 +354,40 @@ def test_vram_checked_when_key_changes(fake_upstream):
     assert fake_upstream.vram_calls == [fake_upstream.ckpt]
     _real_synth(fake_upstream, checkpoint=str(other), name="2").runtime
     assert fake_upstream.vram_calls == [fake_upstream.ckpt, str(other)]
+
+
+def test_first_load_does_not_clear(fake_upstream):
+    _real_synth(fake_upstream).runtime
+    assert fake_upstream.order == ["vram", "get"]
+
+
+def test_same_key_calls_neither_clear_nor_vram(fake_upstream):
+    s = _real_synth(fake_upstream)
+    s.runtime
+    fake_upstream.order.clear()
+    s.runtime
+    assert fake_upstream.order == ["get"]
+
+
+def test_key_change_clears_before_vram_check_and_load(fake_upstream):
+    other = fake_upstream.tmp / "ckpt2"
+    other.mkdir()
+    _real_synth(fake_upstream, name="1").runtime
+    fake_upstream.order.clear()
+    _real_synth(fake_upstream, checkpoint=str(other), name="2").runtime
+    assert fake_upstream.order == ["clear", "vram", "get"]
+
+
+def test_loaded_key_reset_when_load_fails(fake_upstream, monkeypatch):
+    s = _real_synth(fake_upstream)
+    s.runtime
+
+    def fail(key):
+        raise RuntimeError("OOM")
+
+    monkeypatch.setattr(sys.modules["irodori_tts.inference_runtime"], "get_cached_runtime", fail)
+    other = fake_upstream.tmp / "ckpt2"
+    other.mkdir()
+    with pytest.raises(RuntimeError):
+        _real_synth(fake_upstream, checkpoint=str(other), name="2").runtime
+    assert synth._LOADED_KEY is None
