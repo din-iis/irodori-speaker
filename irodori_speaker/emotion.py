@@ -3,11 +3,11 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
-import math
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,11 +67,13 @@ s は文番号、c は句番号で、全ての句について 1 件ずつ出力�
 
 JSON_SCHEMA: dict = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "segments": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "s": {"type": "integer"},
                     "c": {"type": "integer"},
@@ -126,8 +128,19 @@ def validate(data: object, shape: list[int]) -> list[list[Annotation]]:
     return result
 
 
-def paragraph_hash(model: str, clauses: list[list[str]]) -> str:
-    return hashlib.sha1(json.dumps([model, clauses], ensure_ascii=False).encode()).hexdigest()
+def paragraph_hash(
+    model: str,
+    clauses: list[list[str]],
+    prev: str | None = None,
+    nxt: str | None = None,
+) -> str:
+    """段落と前後の文脈（None も区別）からキャッシュキーを作る。"""
+    payload = json.dumps([model, clauses, prev, nxt], ensure_ascii=False)
+    return hashlib.sha1(payload.encode()).hexdigest()
+
+
+def _auth_headers(cfg: LLMConfig) -> dict[str, str]:
+    return {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
 
 
 def apply_shift(ann: Annotation, kind: str, narration_shift: int) -> Annotation:
@@ -224,9 +237,7 @@ class LLMAnnotator:
         return json.loads(resp.json()["message"]["content"])
 
     def _chat_openai(self, user_prompt: str) -> object:
-        headers = {}
-        if self.cfg.api_key:
-            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
+        headers = _auth_headers(self.cfg)
         body: dict = {
             "model": self.cfg.model,
             "messages": self._messages(user_prompt),
@@ -261,16 +272,14 @@ class LLMAnnotator:
     ) -> list[list[Annotation]]:
         clauses = [split_clauses(s.text) for s in target]
         shape = [len(c) for c in clauses]
-        key = paragraph_hash(self.cfg.model, clauses)
+        prev_text = "".join(s.text for s in prev) if prev else None
+        nxt_text = "".join(s.text for s in nxt) if nxt else None
+        key = paragraph_hash(self.cfg.model, clauses, prev_text, nxt_text)
         with self._lock:
             cached = self.cache.get(key)
         if cached is not None:
             return [[Annotation(**a) for a in row] for row in cached]
-        prompt = build_user_prompt(
-            "".join(s.text for s in prev) if prev else None,
-            clauses,
-            "".join(s.text for s in nxt) if nxt else None,
-        )
+        prompt = build_user_prompt(prev_text, clauses, nxt_text)
         try:
             anns = validate(self._chat(prompt), shape)
         except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
@@ -287,10 +296,14 @@ class LLMAnnotator:
     def annotate_many(
         self,
         items: list[tuple[list[Segment], list[Segment] | None, list[Segment] | None]],
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[list[list[Annotation]]]:
         workers = max(1, self.cfg.concurrency)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(self.annotate, t, p, n) for t, p, n in items]
+            if progress is not None:
+                for done, _ in enumerate(concurrent.futures.as_completed(futures), 1):
+                    progress(done, len(futures))
             return [f.result() for f in futures]
 
     def unload(self) -> None:
@@ -319,9 +332,10 @@ class LLMServer:
         self.cfg = cfg
         self._proc: subprocess.Popen | None = None
 
-    def _healthy(self) -> bool:
+    def _healthy(self, timeout: float = 5.0) -> bool:
         try:
-            return requests.get(_health_url(self.cfg), timeout=5).status_code == 200
+            resp = requests.get(_health_url(self.cfg), headers=_auth_headers(self.cfg), timeout=timeout)
+            return resp.status_code == 200
         except requests.RequestException:
             return False
 
@@ -342,9 +356,13 @@ class LLMServer:
         self._proc = subprocess.Popen(
             self.cfg.server_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        for _ in range(max(1, math.ceil(self.cfg.server_start_timeout))):
-            time.sleep(1)
-            if self._healthy():
+        deadline = time.monotonic() + self.cfg.server_start_timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            time.sleep(min(1.0, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if self._healthy(timeout=min(5.0, remaining)):
                 return self
         self._stop()
         raise RuntimeError(
@@ -357,7 +375,7 @@ class LLMServer:
 
 
 def list_models(cfg: LLMConfig) -> list[str]:
-    resp = requests.get(_health_url(cfg), timeout=cfg.timeout)
+    resp = requests.get(_health_url(cfg), headers=_auth_headers(cfg), timeout=cfg.timeout)
     resp.raise_for_status()
     data = resp.json()
     if cfg.api == "ollama":

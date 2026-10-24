@@ -405,15 +405,74 @@ def test_server_starts_and_terminates(monkeypatch):
     assert proc.terminated and not proc.killed
 
 
-def test_server_timeout_raises_and_terminates(monkeypatch):
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = FakeClock()
+    monkeypatch.setattr(emotion.time, "monotonic", c.monotonic)
+    monkeypatch.setattr(emotion.time, "sleep", c.sleep)
+    return c
+
+
+def test_server_timeout_raises_and_terminates(monkeypatch, clock):
     proc = FakeProc()
     monkeypatch.setattr(emotion.subprocess, "Popen", lambda *a, **k: proc)
-    monkeypatch.setattr(emotion.time, "sleep", lambda s: None)
     monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
     with pytest.raises(RuntimeError):
         with LLMServer(LLMConfig(server_command=["srv"], server_start_timeout=3)):
             pass
     assert proc.terminated
+
+
+def test_server_wait_respects_timeout_even_when_health_check_is_slow(monkeypatch, clock):
+    proc = FakeProc()
+    started = []
+    monkeypatch.setattr(
+        emotion.subprocess, "Popen", lambda *a, **k: started.append(clock.now) or proc
+    )
+    timeouts = []
+
+    def slow_unhealthy(self, timeout=5.0):
+        timeouts.append(timeout)
+        clock.now += 2  # 1 回の確認に 2 秒かかる
+        return False
+
+    monkeypatch.setattr(LLMServer, "_healthy", slow_unhealthy)
+    with pytest.raises(RuntimeError):
+        with LLMServer(LLMConfig(server_command=["srv"], server_start_timeout=3)):
+            pass
+    assert clock.now - started[0] <= 5
+    assert all(t <= 5 for t in timeouts[1:])  # 先頭は起動前の確認
+    assert proc.terminated
+
+
+def test_server_health_and_list_models_send_authorization(monkeypatch):
+    headers = []
+
+    def fake_get(url, **kw):
+        headers.append(kw.get("headers"))
+        return FakeResp({"data": [{"id": "x"}]}, status=200)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    cfg = LLMConfig(api="openai", base_url="http://h/v1", api_key="k", server_command=["srv"])
+    with LLMServer(cfg):
+        pass  # 起動済み扱い（_healthy が 200）
+    list_models(cfg)
+    assert headers == [{"Authorization": "Bearer k"}] * 2
+
+    headers.clear()
+    list_models(LLMConfig(api="openai", base_url="http://h/v1"))
+    assert not headers[0]  # api_key が無ければ付けない
 
 
 # ---- list_models ----
@@ -438,3 +497,52 @@ def test_list_models_failure_propagates(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
     with pytest.raises(requests.ConnectionError):
         list_models(LLMConfig())
+
+
+# ---- レビュー指摘の修正 ----
+
+
+def test_cache_key_includes_context(tmp_path, monkeypatch):
+    ann = LLMAnnotator(LLMConfig(), tmp_path / "a.jsonl")
+    calls = []
+    monkeypatch.setattr(ann, "_chat", lambda p: calls.append(p) or {"segments": []})
+    target = segs("ふざけるな！")
+    ann.annotate(target, prev=segs("楽しい場面。"))
+    ann.annotate(target, prev=segs("楽しい場面。"))
+    assert len(calls) == 1
+    ann.annotate(target, prev=segs("悲しい場面。"))
+    assert len(calls) == 2
+    ann.annotate(target, nxt=segs("次の場面。"))
+    assert len(calls) == 3
+    ann.annotate(target)
+    assert len(calls) == 4
+
+
+def test_paragraph_hash_distinguishes_none_and_empty_context():
+    c = [["あ。"]]
+    assert paragraph_hash("m", c, None, None) != paragraph_hash("m", c, "", None)
+    assert paragraph_hash("m", c, "a", None) != paragraph_hash("m", c, None, "a")
+
+
+def test_json_schema_forbids_additional_properties():
+    assert JSON_SCHEMA["additionalProperties"] is False
+    assert JSON_SCHEMA["properties"]["segments"]["items"]["additionalProperties"] is False
+
+
+def test_annotate_many_reports_progress_in_order(tmp_path, monkeypatch):
+    ann = LLMAnnotator(LLMConfig(concurrency=2), tmp_path / "a.jsonl")
+    monkeypatch.setattr(ann, "_chat", lambda p: {"segments": []})
+    calls = []
+    items = [(segs(t), None, None) for t in ("A。", "B。", "C。")]
+    out = ann.annotate_many(items, progress=lambda done, total: calls.append((done, total)))
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+    assert len(out) == 3
+
+
+def test_annotate_many_reports_progress_even_on_error(tmp_path, monkeypatch):
+    ann = LLMAnnotator(LLMConfig(), tmp_path / "a.jsonl")
+    monkeypatch.setattr(ann, "_chat", lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    calls = []
+    with pytest.raises(RuntimeError):
+        ann.annotate_many([(segs("A。"), None, None)], progress=lambda d, t: calls.append((d, t)))
+    assert calls == [(1, 1)]
