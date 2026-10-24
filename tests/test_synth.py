@@ -57,12 +57,27 @@ def test_cache_key_sensitive_to_checkpoint():
 
 
 def test_collect_warnings_truncated():
-    msgs = ["info: predicted duration frames=100, scale=1.5, using_frames=120"]
-    assert collect_warnings(msgs) == ["max_seconds で切り詰め: 予測 100 フレーム × 1.5 > 120"]
+    msgs = ["info: predicted duration frames=1500.0, scale=1.000, using_frames=1000 (30.000s)."]
+    assert collect_warnings(msgs) == [
+        "max_seconds で切り詰め: 予測 1500.0 フレーム × 1.000 > 1000（約 30.000s）"
+    ]
+
+
+def test_collect_warnings_truncated_fractional_scale():
+    msgs = ["info: predicted duration frames=1200.0, scale=1.200, using_frames=1000 (30.000s)."]
+    assert len(collect_warnings(msgs)) == 1
 
 
 def test_collect_warnings_not_truncated():
-    msgs = ["info: predicted duration frames=100, scale=1.0, using_frames=100", "info: other"]
+    msgs = [
+        "info: predicted duration frames=900.0, scale=1.000, using_frames=900 (18.000s).",
+        "info: other",
+    ]
+    assert collect_warnings(msgs) == []
+
+
+def test_collect_warnings_rounding_is_not_truncation():
+    msgs = ["info: predicted duration frames=900.4, scale=1.000, using_frames=900 (18.000s)."]
     assert collect_warnings(msgs) == []
 
 
@@ -174,7 +189,7 @@ def test_synthesize_miss_writes_wav_and_no_tmp_left(make_synth):
 
 
 def test_synthesize_appends_warnings(make_synth, tmp_path):
-    msgs = ["bad thing", "info: predicted duration frames=100, scale=1.0, using_frames=50"]
+    msgs = ["bad thing", "info: predicted duration frames=100.0, scale=1.000, using_frames=50 (1.000s)."]
     s, _ = make_synth(runtime=FakeRuntime(msgs))
     path = s.synthesize("hi")
     assert len(s.last_warnings) == 2

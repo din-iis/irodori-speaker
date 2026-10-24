@@ -12,7 +12,7 @@ from .config import Config
 from .voices import voice_key as _voice_key
 
 _DURATION_RE = re.compile(
-    r"info: predicted duration frames=(\d+), scale=([\d.]+), using_frames=(\d+)"
+    r"info: predicted duration frames=([\d.]+), scale=([\d.]+), using_frames=(\d+)(?: \(([\d.]+)s\))?"
 )
 
 
@@ -143,11 +143,14 @@ def collect_warnings(messages: list[str]) -> list[str]:
         if not m.startswith("info:"):
             warnings.append(m)
             continue
-        hit = _DURATION_RE.fullmatch(m.strip())
+        hit = _DURATION_RE.search(m)
         if hit:
-            frames, scale, using = int(hit[1]), float(hit[2]), int(hit[3])
-            if round(frames * scale) > using:
-                warnings.append(f"max_seconds で切り詰め: 予測 {frames} フレーム × {hit[2]} > {using}")
+            frames, scale, using = float(hit[1]), float(hit[2]), int(hit[3])
+            if frames * scale > using + 0.5:
+                secs = f"（約 {hit[4]}s）" if hit[4] else ""
+                warnings.append(
+                    f"max_seconds で切り詰め: 予測 {hit[1]} フレーム × {hit[2]} > {using}{secs}"
+                )
     return warnings
 
 
