@@ -100,3 +100,12 @@ def test_uppercase_extension_listed_and_resolved(tmp_path):
     _wav(tmp_path / "narrator.WAV")
     assert list_voices(tmp_path) == ["narrator"]
     assert resolve_voice(tmp_path, "narrator") == [tmp_path / "narrator.WAV"]
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("none", True), (" none ", True), ("None", False), ("narrator", False), ("", False), (None, False),
+])
+def test_is_no_ref(value, expected):
+    from irodori_speaker.voices import is_no_ref
+
+    assert is_no_ref(value) is expected

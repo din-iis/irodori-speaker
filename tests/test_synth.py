@@ -487,3 +487,37 @@ def test_cache_key_includes_text_rule(monkeypatch):
     before = cache_key(cfg, "hi", "L")
     monkeypatch.setattr(synth, "TEXT_RULE", "other-rule")
     assert cache_key(cfg, "hi", "L") != before
+
+
+# ---------- voice: none（参照音声なし） ----------
+
+
+def test_no_ref_latent_key_is_fixed_and_separates_cache(tmp_path):
+    cfg = Config(device="cpu")
+    s = Synthesizer(cfg, tmp_path / "seg", [], tmp_path / "lat")
+    assert s.latent_key == synth.NO_REF_LATENT_KEY == "no-ref"
+    voice = tmp_path / "v.wav"
+    voice.write_bytes(b"abc")
+    with_ref = Synthesizer(cfg, tmp_path / "seg2", [voice], tmp_path / "lat")
+    assert s.latent_key != with_ref.latent_key
+    assert cache_key(cfg, "hi", s.latent_key) != cache_key(cfg, "hi", with_ref.latent_key)
+
+
+def test_no_ref_request_passes_no_ref_and_skips_encode(tmp_path, monkeypatch):
+    monkeypatch.setattr(synth, "_sampling_request", lambda **kw: types.SimpleNamespace(**kw))
+
+    def boom(*a, **k):
+        raise AssertionError("encode_voice called")
+
+    monkeypatch.setattr(synth, "encode_voice", boom)
+    s = Synthesizer(Config(device="cpu"), tmp_path / "seg", [], tmp_path / "lat")
+    assert s.latent_path is None
+    req = s._request("こんにちは。")
+    assert req.ref_latent is None and req.no_ref is True
+
+
+def test_request_with_ref_keeps_ref_latent_and_no_no_ref(make_synth):
+    s, _ = make_synth()
+    req = s._request("hi")
+    assert req.ref_latent.endswith("x.pt")
+    assert not hasattr(req, "no_ref")

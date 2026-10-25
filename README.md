@@ -72,6 +72,15 @@ voices/narrator/             # フォルダ内の複数クリップ → voice: n
 - 参照音声は初回の合成で一度だけ潜在表現（`out/.voices/<sha1>.pt`）に変換してキャッシュします。ファイル名と中身が同じなら、`voices/` を rsync し直してもキャッシュは有効です。
 - `voices/` の中身は git に入れません（`.gitignore` 済み）。GPU マシンに直接置くか、rsync で送ってください。
 
+### 参照音声を使わない（`voice: none`）
+
+`voice` に予約語 `none` を書く（CLI は `--voice none`、WebUI は声の欄の先頭の「none」）と、参照音声を渡さずに合成します（上流の `no_ref=True`）。
+
+- **話者 LoRA を統合した checkpoint と組み合わせる設定です。** v4.1-Small は参照音声を渡すと、絵文字でもキャプションでも感情がほとんど出ませんでした。話者 LoRA を統合した checkpoint を参照音声なしで使うと、声が文ごとにぶれず、絵文字の感情も効きました。
+- **ベースモデルでは使わないでください。** 参照音声がないと声が定まらず、文ごとに別人になります。
+- 参照音声の変換（潜在表現のキャッシュ）は行いません。文のキャッシュと章 WAV の署名は参照音声ありと別になるので、`none` に切り替えると作り直しになります。
+- `none` は予約語です。`voices/none.wav` があっても参照音声としては使われず、WebUI の「声を追加」も ID `none` を拒否します。`voice` を未指定（`null`）にしたときは、従来どおり案内を出して止まります。
+
 ### Mac（開発・テスト）
 
 Mac には torch も GPU も入れません。`script` ステップ（Ollama があれば LLM 付きで、無ければ `--no-emotion`）とテストが動きます。
@@ -129,7 +138,7 @@ uv run --no-sync python -m irodori_speaker run novel.txt -c config.yaml
 | オプション | 内容 |
 |---|---|
 | `--force` | 合成済みの文も作り直す |
-| `--voice ID` | 声の ID（config の `voice` を上書き）。`voices/` 内の ID のほか、ファイルやフォルダのパスも指定できる |
+| `--voice ID` | 声の ID（config の `voice` を上書き）。`voices/` 内の ID のほか、ファイルやフォルダのパスも指定できる。`none` なら参照音声を使わない |
 | `--checkpoint ID` | TTS のチェックポイント（config の `checkpoint` を上書き） |
 
 ```bash
@@ -244,7 +253,7 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 | `device` / `precision` | `cuda` / `bf16` | `cuda`・`mps`・`cpu` と `fp32`・`bf16`。CUDA は bf16 が速く VRAM も半分 |
 | `min_free_vram_gb` | `3.0` | TTS を読み込む前の空き VRAM の下限。足りなければ LLM の停止を案内して止まる（`0` で無効） |
 | `empty_cache_interval` | `10` | N 文ごとに `torch.cuda.empty_cache()`（`0` で無効） |
-| `voices_dir` / `voice` | `voices` / 既定なし（例: `narrator`） | 参照音声の置き場所と、使う声の ID。`voice` が未設定だと `synth` は案内を出して止まる（`--voice` でも指定できる） |
+| `voices_dir` / `voice` | `voices` / 既定なし（例: `narrator`） | 参照音声の置き場所と、使う声の ID。`none` は参照音声を使わない予約語（話者 LoRA 統合 checkpoint 向け）。`voice` が未設定だと `synth` は案内を出して止まる（`--voice` でも指定できる） |
 | `ref_normalize_db` | `-16.0` | 参照音声のラウドネス正規化（`null` で無効） |
 | `max_ref_seconds` | `null` | 参照音声の上限秒数。`null` はチェックポイントの既定（v4 は 120 秒） |
 | `sampling.*` | | `num_steps`・`cfg_scale_text`（3.0）・`cfg_scale_speaker`（5.0）・`duration_scale`（0.8）・`t_schedule_mode`・`sway_coeff`・`max_seconds`（30.0）・`seed`（42） |

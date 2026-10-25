@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from irodori_speaker.config import load_config
@@ -531,3 +533,41 @@ def test_carry_emoji_は_Irodori_以外の記号を引き継がない():
 
     src = [["室温は20℃です。", "次は5㎏です。", "♪あ。", "★い。"]]
     assert carry_emoji(src) == src
+
+
+def test_Engine_key_for_は_none_を受け付け空は拒否する():
+    engine = Engine(load_config(None))
+    assert engine.key_for(None, None, None, "none")[3] == "none"
+    with pytest.raises(ValueError):
+        engine.key_for(None, None, None, "")
+
+
+def test_Engine_get_は_none_で_resolve_voice_を呼ばない(tmp_path, monkeypatch):
+    from irodori_speaker import voices
+
+    def boom(*a, **k):
+        raise AssertionError("resolve_voice called")
+
+    monkeypatch.setattr(voices, "resolve_voice", boom)
+    cfg = replace(load_config(None), output_dir=str(tmp_path / "out"), voices_dir=str(tmp_path / "v"))
+    engine = Engine(cfg)
+    key = engine.key_for(None, None, None, "none")
+    s = engine.get(key, tmp_path / "seg")
+    assert s.voice_paths == []
+
+
+def test_voice_choices_は_none_が先頭で重複しない(tmp_path):
+    from irodori_speaker.webui import voice_choices
+
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "none.wav").write_bytes(b"x")
+    (voices / "narrator.wav").write_bytes(b"x")
+    assert voice_choices(voices) == ["none", "narrator"]
+
+
+def test_add_voice_は_none_を拒否する(tmp_path):
+    src = tmp_path / "x.wav"
+    src.write_bytes(b"RIFF")
+    with pytest.raises(ValueError, match="予約語"):
+        add_voice(src, "none", tmp_path / "voices")

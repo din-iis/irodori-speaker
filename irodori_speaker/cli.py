@@ -26,11 +26,15 @@ TTS_MISSING = (
 def _make_synthesizer(cfg: Config, out_dir: Path, voice: str, checkpoint: str | None):
     # torch / irodori_tts が無い環境でも script だけは動くよう遅延 import
     from .synth import Synthesizer
-    from .voices import describe_voice, resolve_voice
+    from .voices import describe_voice, is_no_ref, resolve_voice
 
     # checkpoint の上書きは呼び出し側（_run_synth）が cfg に反映済み。引数は互換のため残す
-    voice_paths = resolve_voice(Path(cfg.voices_dir), voice)
-    print(f"使う声: {describe_voice(voice_paths)}")
+    if is_no_ref(voice):
+        voice_paths = []
+        print("使う声: なし（参照音声を使わない）")
+    else:
+        voice_paths = resolve_voice(Path(cfg.voices_dir), voice)
+        print(f"使う声: {describe_voice(voice_paths)}")
     return Synthesizer(
         cfg,
         out_dir / "segments",
@@ -153,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def synth_opts(p: argparse.ArgumentParser) -> None:
         p.add_argument("--force", action="store_true", help="合成済みのセグメントも作り直す")
-        p.add_argument("--voice", help="声の名前（config の voice を上書き）")
+        p.add_argument("--voice", help="声の名前（config の voice を上書き）。none なら参照音声を使わない")
         p.add_argument("--checkpoint", help="TTS のチェックポイント（config を上書き）")
 
     for name, helptext, opts in (

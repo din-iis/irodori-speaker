@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +11,7 @@ import pytest
 import soundfile as sf
 
 from irodori_speaker import cli, pipeline
-from irodori_speaker.config import Config
+from irodori_speaker.config import Config, load_config
 from irodori_speaker.text_splitter import build_chapters, read_text
 
 NOVEL = Path(__file__).parent / "sample_novel.txt"
@@ -651,3 +651,31 @@ def test_failed_concat_removes_old_full_wav(book, monkeypatch):
     with pytest.raises(OSError):
         pipeline.synthesize_book(rows, titles, cfg, out, synth)
     assert not first.full_path.exists()
+
+
+def test_make_synthesizer_none_skips_resolve_voice(tmp_path, monkeypatch):
+    from irodori_speaker import voices
+
+    def boom(*a, **k):
+        raise AssertionError("resolve_voice called")
+
+    monkeypatch.setattr(voices, "resolve_voice", boom)
+    cfg = load_config(None)
+    cfg = replace(cfg, voices_dir=str(tmp_path / "empty_voices"), output_dir=str(tmp_path / "out"))
+    s = cli._make_synthesizer(cfg, tmp_path / "book", "none", None)
+    assert s.voice_paths == []
+
+
+def test_cli_synth_accepts_voice_none(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"output_dir: {tmp_path / 'out'}\n", encoding="utf-8")
+    cli.main(["script", str(NOVEL), "-c", str(cfg), "--no-emotion"])
+    seen = []
+
+    def fake(cfg_, out_dir, voice, checkpoint):
+        seen.append(voice)
+        raise ImportError("stop")
+
+    monkeypatch.setattr(cli, "_make_synthesizer", fake)
+    assert cli.main(["synth", str(NOVEL), "-c", str(cfg), "--voice", "none"]) == 2
+    assert seen == ["none"]

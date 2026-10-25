@@ -28,7 +28,7 @@ from .pipeline import (
     synthesize_book,
     write_script,
 )
-from .voices import AUDIO_EXTS, list_voices
+from .voices import AUDIO_EXTS, NO_REF_VOICE, is_no_ref, list_voices
 
 CHECKPOINT_CHOICES = [
     "Aratako/Irodori-TTS-v4.1-Small",
@@ -197,11 +197,18 @@ def carry_emoji(paragraphs: list[list[str]]) -> list[list[str]]:
     return result
 
 
+def voice_choices(voices_dir) -> list[str]:
+    """声の候補。先頭は参照音声なしの none（voices/none.wav があっても重複させない）。"""
+    return [NO_REF_VOICE] + [v for v in list_voices(Path(voices_dir)) if v != NO_REF_VOICE]
+
+
 def add_voice(src, voice_id: str, voices_dir) -> Path:
     """アップロードされた音声を voices/<id><拡張子> にコピーする。"""
     voice_id = (voice_id or "").strip()
     if not voice_id or "/" in voice_id or "\\" in voice_id or voice_id.startswith("."):
         raise ValueError("声の ID には、空でなく / \\ を含まず . で始まらない名前を指定してください")
+    if voice_id == NO_REF_VOICE:
+        raise ValueError(f"{NO_REF_VOICE} は参照音声を使わない設定の予約語なので、声の ID には使えません")
     if not src:
         raise ValueError("先に参照音声をアップロードしてください")
     src = Path(src)
@@ -323,8 +330,12 @@ class Engine:
 
         cfg = self.cfg_for(key)
         if self._synth is None or self._key != key:
-            voice_paths = resolve_voice(Path(cfg.voices_dir), cfg.voice)
-            print(f"[webui] 使う声: {describe_voice(voice_paths)}")
+            if is_no_ref(cfg.voice):
+                voice_paths = []
+                print("[webui] 使う声: なし（参照音声を使わない）")
+            else:
+                voice_paths = resolve_voice(Path(cfg.voices_dir), cfg.voice)
+                print(f"[webui] 使う声: {describe_voice(voice_paths)}")
             self._synth = Synthesizer(
                 cfg, segments_dir, voice_paths, Path(cfg.output_dir) / ".voices", warnings_path
             )
@@ -400,7 +411,7 @@ def build_app(cfg: Config):
     # -- TTS 設定 --
 
     def refresh_voices(current):
-        return gr.update(choices=list_voices(voices_dir), value=current)
+        return gr.update(choices=voice_choices(voices_dir), value=current)
 
     def upload_voice(audio_path, voice_id):
         try:
@@ -409,7 +420,7 @@ def build_app(cfg: Config):
             raise gr.Error(str(e)) from e
         engine.invalidate()
         print(f"[webui] 声を追加しました: {dest}")
-        return gr.update(choices=list_voices(voices_dir), value=dest.stem), f"✅ 声を追加しました: {dest}"
+        return gr.update(choices=voice_choices(voices_dir), value=dest.stem), f"✅ 声を追加しました: {dest}"
 
     def load_model(checkpoint, device, precision, voice):
         key = tts_key(checkpoint, device, precision, voice)
@@ -751,7 +762,7 @@ def build_app(cfg: Config):
                 precision = gr.Dropdown(PRECISION_CHOICES, value=cfg.precision, label="precision", scale=1)
             with gr.Row():
                 voice = gr.Dropdown(
-                    list_voices(voices_dir), value=cfg.voice, allow_custom_value=True, label="声", scale=3
+                    voice_choices(voices_dir), value=cfg.voice, allow_custom_value=True, label="声", scale=3
                 )
                 refresh_btn = gr.Button("更新", scale=1)
                 load_btn = gr.Button("モデル読み込み", variant="primary", scale=1)

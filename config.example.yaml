@@ -7,6 +7,7 @@ min_free_vram_gb: 3.0   # TTS 読み込み前の空き VRAM チェック（0 で
 empty_cache_interval: 10  # N 文ごとに torch.cuda.empty_cache()（0 で無効）
 
 voices_dir: voices
+# none と書くと参照音声を使わずに合成する（話者 LoRA を統合した checkpoint 向け。README の「参照音声を使わない」を参照）
 voice: narrator         # voices/narrator.wav か voices/narrator/ 内の複数クリップ（名前順に連結、合計 30 秒程度が推奨）
 ref_normalize_db: -16.0 # null で無効
 max_ref_seconds: null   # null = チェックポイント既定（v4 は 120 秒）

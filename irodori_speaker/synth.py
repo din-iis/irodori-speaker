@@ -36,6 +36,10 @@ def check_vram(cfg: Config) -> None:
         )
 
 
+# 参照音声なし（voice: none）のときの latent_key。参照音声ありの文キャッシュ・章署名と別扱いにする
+NO_REF_LATENT_KEY = "no-ref"
+
+
 def latent_key(
     voice_key: str, codec_repo: str, normalize_db: float | None, max_ref_seconds: float | None
 ) -> str:
@@ -242,7 +246,10 @@ class Synthesizer:
         self.latent_cache_dir = Path(latent_cache_dir)
         self.warnings_path = Path(warnings_path) if warnings_path else None
         self.last_warnings: list[str] = []
-        self.latent_key = latent_key_for(cfg, _voice_key(self.voice_paths))
+        # voice_paths が空なら参照音声なし（no_ref=True で合成する）
+        self.latent_key = (
+            latent_key_for(cfg, _voice_key(self.voice_paths)) if self.voice_paths else NO_REF_LATENT_KEY
+        )
         self._checkpoint: str | None = None
         self._latent_path: Path | None = None
         self._count = 0
@@ -255,7 +262,9 @@ class Synthesizer:
         return load_runtime(self.cfg, self._checkpoint)
 
     @property
-    def latent_path(self) -> Path:
+    def latent_path(self) -> Path | None:
+        if not self.voice_paths:
+            return None
         if self._latent_path is None:
             self._latent_path = encode_voice(
                 self.runtime, self.voice_paths, self.latent_cache_dir, self.cfg
@@ -266,6 +275,14 @@ class Synthesizer:
         s = self.cfg.sampling
         params = {f: getattr(s, f) for f in _SAMPLING_FIELDS}
         params.update(overrides)
+        if not self.voice_paths:
+            return _sampling_request(
+                text=tts_text(text),
+                ref_latent=None,
+                no_ref=True,
+                max_ref_seconds=self.cfg.max_ref_seconds,
+                **params,
+            )
         return _sampling_request(
             text=tts_text(text),
             ref_latent=str(self.latent_path),

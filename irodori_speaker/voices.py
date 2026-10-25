@@ -5,7 +5,13 @@ from pathlib import Path
 
 import soundfile as sf
 
+# voice にこの名前を書くと参照音声を使わずに合成する（予約語。voices/none.wav があっても参照音声にはならない）
+NO_REF_VOICE = "none"
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".webm"}
+
+
+def is_no_ref(voice: str | None) -> bool:
+    return voice is not None and voice.strip() == NO_REF_VOICE
 
 
 def _is_audio(p: Path) -> bool:
