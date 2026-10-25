@@ -308,9 +308,10 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml \
   --checkpoint Aratako/Irodori-TTS-v4.1-Small --checkpoint /path/to/merged.safetensors
 ```
 
-- 声・sampling・seed は `config.yaml` の値を使い、キャプション（なし / 怒り / 悲しみ / 喜び / ささやき）と `cfg_scale_caption`（3 / 5）だけを変えて、台詞と地の文の 2 文を生成します。
+- 声・sampling・seed は `config.yaml` の値を使い、キャプション（なし / 怒り / 悲しみ / 喜び / ささやき）と `cfg_scale_caption`（3 / 5）だけを変えて、台詞と地の文の 2 文を生成します。比べるため、キャプションの代わりに `emotion_emoji` の強度 3 の絵文字を文頭に付けたものも作ります。
 - `--checkpoint` を複数渡すと順に比べます。省略すると `config.yaml` の `checkpoint` を使います。
-- 出力は `out/caption_test/<番号>_<checkpoint 名>/` に、`1_none.wav`（1 文目・キャプションなし）、`1_angry_cap3.wav` のような名前でできます。文とキャプションはスクリプト冒頭の `TEXTS` と `CAPTIONS` で変えられます。
+- `--no-ref` を付けると参照音声を渡さずに生成します。参照音声があると感情が出にくいのかを切り分けるためのもので、ベースモデルでは声が参照音声と別人になります。
+- 出力は `out/caption_test/<番号>_<checkpoint 名>/`（`--no-ref` のときは末尾に `_noref`）に、`1_none.wav`（1 文目・キャプションなし）、`1_angry_cap3.wav`、`1_angry_emoji.wav` のような名前でできます。文とキャプションはスクリプト冒頭の `TEXTS` と `CAPTIONS` で変えられます。
 
 ## 注意
 
