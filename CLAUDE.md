@@ -30,6 +30,8 @@ uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml     #
 uv run --no-sync python -m irodori_speaker synth  novel.txt -c config.yaml     # ステップ 2（TTS だけ）
 uv run --no-sync python -m irodori_speaker run    novel.txt -c config.yaml     # 一括
 uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
+# キャプション（上流の SamplingRequest.caption）で感情を指示できるかの実験。本体の合成はまだキャプションを使わない
+uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> --checkpoint <B>
 ```
 
 サブコマンドは `script` / `synth` / `run`。`script` は `--chapters --no-emotion --reannotate --llm-model --think`、`synth` は `--chapters --force --voice --checkpoint`、`run` はその両方を取る。lint / formatter の設定は無い。`uv.lock` の `irodori-tts` を更新するときは `uv lock --upgrade-package irodori-tts`。

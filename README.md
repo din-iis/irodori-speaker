@@ -299,6 +299,19 @@ llm:
 - 日本語のみに対応しています。
 - 声を変えたら（ファイルの中身を差し替えたら）、参照音声の潜在表現と文ごとのキャッシュが自動で作り直されます。
 
+### キャプションで感情を試す（実験）
+
+v4.1-Small は、参照音声と一緒にキャプション（「激しく怒って、強い口調で相手を問い詰めている」のような文）を受け取れます。本ツールの合成はまだキャプションを使いませんが、`scripts/caption_test.py` で効き方を試せます。GPU マシンで、Ollama を止めてから実行します。
+
+```bash
+uv run --no-sync python scripts/caption_test.py -c config.yaml \
+  --checkpoint Aratako/Irodori-TTS-v4.1-Small --checkpoint /path/to/merged.safetensors
+```
+
+- 声・sampling・seed は `config.yaml` の値を使い、キャプション（なし / 怒り / 悲しみ / 喜び / ささやき）と `cfg_scale_caption`（3 / 5）だけを変えて、台詞と地の文の 2 文を生成します。
+- `--checkpoint` を複数渡すと順に比べます。省略すると `config.yaml` の `checkpoint` を使います。
+- 出力は `out/caption_test/<番号>_<checkpoint 名>/` に、`1_none.wav`（1 文目・キャプションなし）、`1_angry_cap3.wav` のような名前でできます。文とキャプションはスクリプト冒頭の `TEXTS` と `CAPTIONS` で変えられます。
+
 ## 注意
 
 - **透かし**: 出力される音声には、上流の仕様で SilentCipher の透かしが入ります。
