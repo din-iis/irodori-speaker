@@ -44,8 +44,8 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> 
 2. `emotion.py`: `split_clauses` が文を句（`、。！？!?…‥，,`）に分け、**段落単位**で LLM を呼んで句ごとに感情 10 種 × 強度 1〜3 を得る。出力は `validate()` で検証し、不正値・欠落は neutral にフォールバック。成功結果だけ `annotations.jsonl` にキャッシュする（キーはモデル・段落・前後の文脈・`think`）。`apply_shift` で地の文の強度を下げ、`build_spoken_text` が `emotion_emoji` の表から絵文字を句の先頭（括弧で始まる句は括弧の直後）に置く。同じ文の中で直前の句と同じ絵文字は置かない。`LLMAnnotator` は `llm.api` で 2 系統（`ollama` / `openai`）、`LLMServer` が `server_command` のプロセスを起動・停止する。
 3. `pipeline.annotate_chapters`: 結果を `out/<book>/script.tsv` に書く。LLM の起動・停止と `unload()` はこの関数の中で完結し、ステップ 2 に LLM の状態を持ち込まない。`build_script` が `chapters.json` も書く。
 - `emoji.py`: Irodori-TTS が解釈する絵文字 45 種（`IRODORI_EMOJI`）。`emoji_runs` で本文中の連なりを判定し、`safe_cut` で文字数での分割が連なりの途中を切らないようにする。`webui.carry_emoji` と `text_splitter` が使う。
-4. `voices.py`: `voices/<id>.<ext>` か `voices/<id>/`（複数クリップは名前順）を解決し、`voice_key` はファイル名と中身の sha1（mtime は使わない）。。予約語 `NO_REF_VOICE = "none"`（`is_no_ref`）は参照音声なしを表し、`resolve_voice` を通さない
-5. `synth.py`: `check_vram` → `load_runtime` → `encode_voice` → `Synthesizer.synthesize`。文ごとに `segments/<sha1>.wav` に保存する。。`voice_paths` が空なら参照音声なしで、`latent_key` は固定の `NO_REF_LATENT_KEY`、`latent_path` は None（encode しない）、`_request` は `ref_latent=None, no_ref=True` を渡す
+4. `voices.py`: `voices/<id>.<ext>` か `voices/<id>/`（複数クリップは名前順）を解決し、`voice_key` はファイル名と中身の sha1（mtime は使わない）。予約語 `NO_REF_VOICE = "none"`（`is_no_ref`）は参照音声なしを表し、`resolve_voice` を通さない。
+5. `synth.py`: `check_vram` → `load_runtime` → `encode_voice` → `Synthesizer.synthesize`。文ごとに `segments/<sha1>.wav` に保存する。`voice_paths` が空なら参照音声なしで、`latent_key` は固定の `NO_REF_LATENT_KEY`、`latent_path` は None（encode しない）、`_request` は `ref_latent=None, no_ref=True` を渡す。
 6. `pipeline.synthesize_book` + `assemble.py`: 文間・段落間・章頭の無音を挟んで章 WAV（`chapters/NN_タイトル.wav`）、続けて全体 WAV を書く。サンプリングレートは固定せず、キャッシュ WAV から読む。
 
 ### script.tsv
