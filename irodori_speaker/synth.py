@@ -36,7 +36,7 @@ def check_vram(cfg: Config) -> None:
         )
 
 
-# 参照音声なし（voice: none）のときの latent_key。参照音声ありの文キャッシュ・章署名と別扱いにする
+# 参照音声なし（voice: none）の latent_key の名前空間。参照音声ありの文キャッシュ・章署名と別扱いにする
 NO_REF_LATENT_KEY = "no-ref"
 
 
@@ -50,6 +50,11 @@ def latent_key_for(cfg: Config, voice_key: str) -> str:
     # max_ref_seconds が None のときの実効上限はチェックポイント依存なので、キーに checkpoint を含める
     max_ref = cfg.max_ref_seconds if cfg.max_ref_seconds is not None else f"checkpoint:{cfg.checkpoint}"
     return latent_key(voice_key, cfg.codec_repo, cfg.ref_normalize_db, max_ref)
+
+
+def no_ref_latent_key(cfg: Config) -> str:
+    """参照音声なしの latent_key。生成した潜在表現のデコードに使う codec_repo だけを含める。"""
+    return latent_key(NO_REF_LATENT_KEY, cfg.codec_repo, None, None)
 
 
 # モデルに渡す文字列の加工規則。変えると文のキャッシュと章 WAV の署名が作り直しになる
@@ -248,7 +253,7 @@ class Synthesizer:
         self.last_warnings: list[str] = []
         # voice_paths が空なら参照音声なし（no_ref=True で合成する）
         self.latent_key = (
-            latent_key_for(cfg, _voice_key(self.voice_paths)) if self.voice_paths else NO_REF_LATENT_KEY
+            latent_key_for(cfg, _voice_key(self.voice_paths)) if self.voice_paths else no_ref_latent_key(cfg)
         )
         self._checkpoint: str | None = None
         self._latent_path: Path | None = None

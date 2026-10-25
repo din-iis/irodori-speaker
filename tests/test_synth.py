@@ -1,5 +1,6 @@
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -495,7 +496,7 @@ def test_cache_key_includes_text_rule(monkeypatch):
 def test_no_ref_latent_key_is_fixed_and_separates_cache(tmp_path):
     cfg = Config(device="cpu")
     s = Synthesizer(cfg, tmp_path / "seg", [], tmp_path / "lat")
-    assert s.latent_key == synth.NO_REF_LATENT_KEY == "no-ref"
+    assert s.latent_key == synth.no_ref_latent_key(cfg)
     voice = tmp_path / "v.wav"
     voice.write_bytes(b"abc")
     with_ref = Synthesizer(cfg, tmp_path / "seg2", [voice], tmp_path / "lat")
@@ -521,3 +522,16 @@ def test_request_with_ref_keeps_ref_latent_and_no_no_ref(make_synth):
     req = s._request("hi")
     assert req.ref_latent.endswith("x.pt")
     assert not hasattr(req, "no_ref")
+
+
+def test_no_ref_latent_key_depends_only_on_codec_repo(tmp_path):
+    base = Config(device="cpu")
+    key = synth.no_ref_latent_key(base)
+    assert key != synth.no_ref_latent_key(replace(base, codec_repo="other/codec"))
+    assert key == synth.no_ref_latent_key(replace(base, ref_normalize_db=-20.0, max_ref_seconds=10.0))
+    voice = tmp_path / "v.wav"
+    voice.write_bytes(b"abc")
+    assert key != latent_key_for(base, "x")
+    s = Synthesizer(replace(base, codec_repo="other/codec"), tmp_path / "seg", [], tmp_path / "lat")
+    assert s.latent_key == synth.no_ref_latent_key(replace(base, codec_repo="other/codec"))
+    assert s.latent_key != Synthesizer(base, tmp_path / "seg", [], tmp_path / "lat").latent_key
