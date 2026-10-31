@@ -77,7 +77,13 @@ def tts_text(text: str) -> str:
     return stripped + tail
 
 
-def cache_key(cfg: Config, text: str, latent_key: str) -> str:
+def row_seed(row: dict) -> int | None:
+    """script.tsv の seed 列。空なら None（config の sampling.seed を使う）。"""
+    value = str(row.get("seed", "")).strip()
+    return int(value) if value else None
+
+
+def cache_key(cfg: Config, text: str, latent_key: str, seed: int | None = None) -> str:
     s = cfg.sampling
     return _sha1(
         {
@@ -92,7 +98,7 @@ def cache_key(cfg: Config, text: str, latent_key: str) -> str:
             "cfg_scale_speaker": s.cfg_scale_speaker,
             "duration_scale": s.duration_scale,
             "max_seconds": s.max_seconds,
-            "seed": s.seed,
+            "seed": seed if seed is not None else s.seed,
         }
     )
 
@@ -295,13 +301,14 @@ class Synthesizer:
             **params,
         )
 
-    def synthesize(self, text: str, force: bool = False) -> Path:
-        key = cache_key(self.cfg, text, self.latent_key)
+    def synthesize(self, text: str, force: bool = False, seed: int | None = None) -> Path:
+        key = cache_key(self.cfg, text, self.latent_key, seed)
         path = self.segments_dir / f"{key}.wav"
         if path.exists() and not force:
             self.last_warnings = []
             return path
-        res = self.runtime.synthesize(self._request(text))
+        # seed が None のときは渡さない（渡すと params.update で config の seed が None に化ける）
+        res = self.runtime.synthesize(self._request(text, **({} if seed is None else {"seed": seed})))
         tmp = path.with_name(f"{key}.tmp.wav")
         _save_wav(tmp, res.audio, res.sample_rate)
         tmp.replace(path)

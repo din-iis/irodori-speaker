@@ -11,10 +11,10 @@ from typing import Callable
 
 from .assemble import Clip, concat_wavs, safe_name, write_chapter
 from .config import EMOTIONS, Config
-from .synth import TEXT_RULE
+from .synth import TEXT_RULE, row_seed
 from .text_splitter import Chapter, build_chapters, read_text
 
-TSV_FIELDS = ["chapter", "para", "seg", "kind", "labels", "text", "source"]
+TSV_FIELDS = ["chapter", "para", "seg", "kind", "labels", "text", "source", "seed"]
 
 Progress = Callable[[int, int, str], None]
 
@@ -66,10 +66,11 @@ def load_script(path: Path) -> dict[tuple[int, int, int], dict]:
     if not path.exists():
         return {}
     with path.open(encoding="utf-8", newline="") as f:
-        return {
-            (int(r["chapter"]), int(r["para"]), int(r["seg"])): r
-            for r in csv.DictReader(f, delimiter="\t")
-        }
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    for r in rows:
+        for name in TSV_FIELDS:  # 古いファイル（seed 列なし）も読めるようにする
+            r.setdefault(name, "")
+    return {(int(r["chapter"]), int(r["para"]), int(r["seg"])): r for r in rows}
 
 
 def write_script(path: Path, rows: list[dict]) -> None:
@@ -164,7 +165,7 @@ def annotate_chapters(
     def saved_row(s) -> dict | None:
         # 保存済みで本文が一致する行は、段落の他の文が変わっていても手修正を保つ
         r = overrides.get(s.key)
-        return _row(s, r["labels"], r["text"]) if r is not None and r["source"] == s.text else None
+        return _row(s, r["labels"], r["text"], r["seed"]) if r is not None and r["source"] == s.text else None
 
     def neutral_row(s) -> dict:
         return saved_row(s) or _row(s, "neutral:1", s.text)
@@ -212,7 +213,10 @@ def annotate_chapters(
     rows: list[dict] = []
     for i, (segs, _, _, kept) in enumerate(plan):
         if kept:
-            rows.extend(_row(s, overrides[s.key]["labels"], overrides[s.key]["text"]) for s in segs)
+            rows.extend(
+                _row(s, overrides[s.key]["labels"], overrides[s.key]["text"], overrides[s.key]["seed"])
+                for s in segs
+            )
         elif i in annotated:
             rows.extend(annotated[i])
         else:
@@ -231,7 +235,7 @@ def annotate_chapters(
     return rows
 
 
-def _row(s, labels: str, text: str) -> dict:
+def _row(s, labels: str, text: str, seed: str = "") -> dict:
     return {
         "chapter": s.chapter_idx,
         "para": s.para_idx,
@@ -240,6 +244,7 @@ def _row(s, labels: str, text: str) -> dict:
         "labels": labels,
         "text": text,
         "source": s.text,
+        "seed": seed,
     }
 
 
@@ -273,7 +278,7 @@ def synthesize_book(
                 if should_stop and should_stop():
                     _remove_old_full(out_dir)
                     return BookResult(chapter_files, None, stopped=True)
-                path = synth.synthesize(spoken_text(r), force=force)
+                path = synth.synthesize(spoken_text(r), force=force, seed=row_seed(r))
                 clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"])))
                 done += 1
                 if progress:
@@ -381,6 +386,8 @@ def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
         getattr(synth, "latent_key", None),
         TEXT_RULE,
     ]
+    if any(row_seed(r) is not None for r in rows):  # 既存の署名を変えないよう、あるときだけ足す
+        payload.append([row_seed(r) for r in rows])
     return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 

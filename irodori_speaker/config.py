@@ -100,6 +100,14 @@ class BgmConfig:
 
 
 @dataclass
+class CheckConfig:
+    z_threshold: float = 3.0
+    cer_threshold: float = 0.3
+    asr_model: str = "kotoba-tech/kotoba-whisper-v2.0"
+    asr_device: str = "cuda"
+
+
+@dataclass
 class Config:
     checkpoint: str = "Aratako/Irodori-TTS-v4.1-Small"
     codec_repo: str = "Aratako/Semantic-DACVAE-Japanese-32dim"
@@ -122,6 +130,7 @@ class Config:
     split: SplitConfig = field(default_factory=SplitConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     bgm: BgmConfig = field(default_factory=BgmConfig)
+    check: CheckConfig = field(default_factory=CheckConfig)
     output_dir: str = "out"
 
 
@@ -131,6 +140,7 @@ _SECTIONS = {
     "split": SplitConfig,
     "silence": SilenceConfig,
     "bgm": BgmConfig,
+    "check": CheckConfig,
 }
 
 

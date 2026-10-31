@@ -111,7 +111,7 @@ class FakeSynth:
         self.forces: list[bool] = []
         self.last_warnings: list[str] = []
 
-    def synthesize(self, text: str, force: bool = False) -> Path:
+    def synthesize(self, text: str, force: bool = False, seed: int | None = None) -> Path:
         self.texts.append(text)
         self.forces.append(force)
         self.segments_dir.mkdir(parents=True, exist_ok=True)
@@ -492,7 +492,7 @@ def test_old_full_wav_removed_when_synthesis_raises(book):
     assert first.full_path.exists()
 
     class Failing(FakeSynth):
-        def synthesize(self, text, force=False):
+        def synthesize(self, text, force=False, seed=None):
             raise RuntimeError("空き VRAM が足りません")
 
     with pytest.raises(RuntimeError):
@@ -574,7 +574,7 @@ def test_cli_synth_runtime_error_returns_1(tmp_path, monkeypatch, capsys):
     cli.main(["script", str(NOVEL), "-c", str(cfg), "--no-emotion"])
 
     class Failing(FakeSynth):
-        def synthesize(self, text, force=False):
+        def synthesize(self, text, force=False, seed=None):
             raise RuntimeError("空き VRAM が足りません")
 
     monkeypatch.setattr(cli, "_make_synthesizer", lambda cfg, out_dir, voice, checkpoint: Failing(out_dir / "segments"))

@@ -78,4 +78,10 @@ bgm:
   ambient_crossfade: 4.0
   mp3_bitrate: 192k
 
+check:   # check サブコマンド（品質チェック）
+  z_threshold: 3.0          # 文字数あたりの秒数が中央値からこの z（MAD 基準）以上ずれた文に long / short の印
+  cer_threshold: 0.3        # --asr のとき、文字誤り率がこれ以上の文に cer の印（漢字/かなの表記差で高めに出るので緩め）
+  asr_model: kotoba-tech/kotoba-whisper-v2.0
+  asr_device: cuda          # cuda | mps | cpu
+
 output_dir: out

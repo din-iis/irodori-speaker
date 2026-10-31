@@ -95,3 +95,15 @@ def test_bgm_intro_must_fit_fades(tmp_path):
     p.write_text("bgm:\n  intro_seconds: 4\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_config(p)
+
+
+def test_check_節を読める(tmp_path):
+    assert load_config(None).check.z_threshold == 3.0
+    assert load_config(None).check.cer_threshold == 0.3
+    assert load_config(None).check.asr_model == "kotoba-tech/kotoba-whisper-v2.0"
+    assert load_config(None).check.asr_device == "cuda"
+    p = tmp_path / "c.yaml"
+    p.write_text("check:\n  z_threshold: 2.5\n  asr_device: cpu\n", encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.check.z_threshold == 2.5 and cfg.check.asr_device == "cpu"
+    assert load_config(ROOT / "config.example.yaml").check.z_threshold == 3.0
