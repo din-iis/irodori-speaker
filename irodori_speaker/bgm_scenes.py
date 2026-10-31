@@ -80,8 +80,11 @@ def _is_text(v: object) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
 
-def validate_scenes(reply: object, shown: list[int]) -> list[dict] | None:
-    """応答が正しければ場面の dict の並びを、壊れていれば None を返す。"""
+def validate_scenes(reply: object, shown: list[int], chapter_start: bool = False) -> list[dict] | None:
+    """応答が正しければ場面の dict の並びを、壊れていれば None を返す。
+
+    章頭のまとまりで空の並びは不正（2 つ目以降の空は「全部続き」で有効）。
+    """
     if not isinstance(reply, dict) or not isinstance(reply.get("scenes"), list):
         return None
     out: list[dict] = []
@@ -92,7 +95,9 @@ def validate_scenes(reply: object, shown: list[int]) -> list[dict] | None:
         start = item.get("start_para")
         if isinstance(start, bool) or not isinstance(start, int) or start not in shown or start <= last:
             return None
-        amb = item.get("ambient_query")
+        if "ambient_query" not in item:  # 欠落は null（意図した無音）と区別する
+            return None
+        amb = item["ambient_query"]
         if not (amb is None or _is_text(amb)):
             return None
         if not _is_text(item.get("description")) or not _is_text(item.get("mood")):
@@ -107,6 +112,8 @@ def validate_scenes(reply: object, shown: list[int]) -> list[dict] | None:
             "mood": item["mood"].strip(),
             "music_query": item["music_query"].strip(),
         })
+    if chapter_start and not out:
+        return None
     return out
 
 
@@ -172,19 +179,19 @@ class ScenePlanner:
             with self.cache_path.open("a", encoding="utf-8") as f:
                 f.write(row)
 
-    def _ask(self, chunk: Paragraphs, prev_desc: str) -> list[dict] | None:
+    def _ask(self, chunk: Paragraphs, prev_desc: str, chapter_start: bool) -> list[dict] | None:
         """1 つのまとまりを問い合わせる。壊れていれば 1 回だけやり直し、だめなら None（キャッシュしない）。"""
         body = "\n".join(f"[{p}] {t}" for p, t in chunk)
         key = _scene_key(self.cfg, body, prev_desc)
         with self._lock:
             cached = self.cache.get(key)
-        if cached is not None:
+        if cached is not None and not (chapter_start and not cached):
             return cached
         user = f"Previous scene: {prev_desc}\n\nParagraphs:\n{body}"
         shown = [p for p, _ in chunk]
         for _ in range(2):
             try:
-                scenes = validate_scenes(self._call(user), shown)
+                scenes = validate_scenes(self._call(user), shown, chapter_start)
             except Exception as e:  # 通信の失敗・応答の形の崩れ
                 print(f"[bgm] 場面の問い合わせに失敗: {type(e).__name__}")
                 scenes = None
@@ -197,9 +204,9 @@ class ScenePlanner:
         scenes: list[Scene] = []
         for ci, chunk in enumerate(chunk_paragraphs(paras, chunk_chars)):
             prev_desc = (scenes[-1].description if scenes else "") or _NO_PREVIOUS
-            got = self._ask(chunk, prev_desc if scenes else _NO_PREVIOUS)
+            got = self._ask(chunk, prev_desc if scenes else _NO_PREVIOUS, ci == 0)
             first_para = chunk[0][0]
-            if got is None or (ci == 0 and not got):
+            if got is None:
                 if not scenes:  # 章頭の失敗: 環境音も音楽も無い場面
                     scenes.append(Scene(chapter, 0, first_para, first_para, "", None, "", "", status="llm_error"))
                 continue  # それ以外は直前の場面が続く
@@ -221,15 +228,19 @@ def merge_short(scenes: list[Scene], para_chars: dict[int, int], min_chars: int)
     def size(s: Scene) -> int:
         return sum(para_chars.get(p, 0) for p in range(s.start_para, s.end_para + 1))
 
-    out: list[Scene] = []
-    for s in scenes:
-        if out and size(s) < min_chars:
-            out[-1] = replace(out[-1], end_para=s.end_para)
-        else:
-            out.append(replace(s))
-    if len(out) > 1 and size(out[0]) < min_chars:
+    out = [replace(s) for s in scenes]
+    # 先に章頭: 短い間は次の場面にまとめ、まとめ先の説明・検索語を使う
+    while len(out) > 1 and size(out[0]) < min_chars:
         out[1] = replace(out[1], start_para=out[0].start_para)
         out.pop(0)
+    # 以後は前の場面にまとめる
+    merged = out[:1]
+    for s in out[1:]:
+        if size(s) < min_chars:
+            merged[-1] = replace(merged[-1], end_para=s.end_para)
+        else:
+            merged.append(s)
+    out = merged
     return [replace(s, index=i) for i, s in enumerate(out)]
 
 

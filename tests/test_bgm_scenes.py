@@ -207,3 +207,38 @@ def test_save_scenes_keeps_other_chapters(tmp_path):
     loaded = load_scenes(path)
     assert loaded == {0: [s0], 1: [s1]}
     assert load_scenes(tmp_path / "none.json") == {}
+
+
+def test_empty_reply_at_chapter_start_is_invalid_and_not_cached(tmp_path):
+    path = tmp_path / "s.jsonl"
+    chat = FakeChat([{"scenes": []}, _scene_reply((0, "street"))])
+    scenes = ScenePlanner(LLMConfig(), path, chat=chat).plan_chapter(0, _paras(3), 3000)
+    assert chat.calls == 2 and scenes[0].status == "ok" and scenes[0].description == "street"  # 1 回だけやり直す
+    chat = FakeChat([{"scenes": []}, {"scenes": []}, _scene_reply((0, "inn"))])
+    path2 = tmp_path / "s2.jsonl"
+    assert ScenePlanner(LLMConfig(), path2, chat=chat).plan_chapter(0, _paras(3), 3000)[0].status == "llm_error"
+    assert not path2.exists() or path2.read_text(encoding="utf-8") == ""  # キャッシュしない
+    # 再実行では問い合わせ直す
+    assert ScenePlanner(LLMConfig(), path2, chat=chat).plan_chapter(0, _paras(3), 3000)[0].description == "inn"
+
+
+def test_empty_reply_in_later_chunk_is_valid_and_cached(tmp_path):
+    path = tmp_path / "s.jsonl"
+    chat = FakeChat([_scene_reply((0, "street")), {"scenes": []}])
+    ScenePlanner(LLMConfig(), path, chat=chat).plan_chapter(0, _paras(4, 1000), 2000)
+    ScenePlanner(LLMConfig(), path, chat=chat).plan_chapter(0, _paras(4, 1000), 2000)
+    assert chat.calls == 2
+
+
+def test_merge_short_handles_chapter_start_before_merging_forward():
+    chars = {0: 200, 1: 200, 2: 600}
+    out = merge_short([_sc(0, 0, "a"), _sc(1, 1, "b"), _sc(2, 2, "c")], chars, 400)
+    assert [(s.index, s.start_para, s.end_para, s.description) for s in out] == [(0, 0, 1, "b"), (1, 2, 2, "c")]
+
+
+def test_missing_ambient_query_key_is_invalid(tmp_path):
+    reply = _scene_reply((0, "street"))
+    del reply["scenes"][0]["ambient_query"]
+    chat = FakeChat([reply, reply])
+    scenes = ScenePlanner(LLMConfig(), tmp_path / "s.jsonl", chat=chat).plan_chapter(0, _paras(3), 3000)
+    assert chat.calls == 2 and scenes[0].status == "llm_error"
