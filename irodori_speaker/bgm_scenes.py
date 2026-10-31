@@ -40,8 +40,10 @@ SCENE_SCHEMA = {
             "music_query": {"type": "string"},
         },
         "required": ["start_para", "description", "ambient_query", "mood", "music_query"],
+        "additionalProperties": False,
     }}},
     "required": ["scenes"],
+    "additionalProperties": False,
 }
 
 _NO_PREVIOUS = "none (start of chapter)"

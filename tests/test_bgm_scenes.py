@@ -242,3 +242,8 @@ def test_missing_ambient_query_key_is_invalid(tmp_path):
     chat = FakeChat([reply, reply])
     scenes = ScenePlanner(LLMConfig(), tmp_path / "s.jsonl", chat=chat).plan_chapter(0, _paras(3), 3000)
     assert chat.calls == 2 and scenes[0].status == "llm_error"
+
+
+def test_scene_schema_objects_forbid_additional_properties():
+    assert SCENE_SCHEMA["additionalProperties"] is False
+    assert SCENE_SCHEMA["properties"]["scenes"]["items"]["additionalProperties"] is False
