@@ -293,3 +293,31 @@ def test_cli_bgm_help_is_japanese(capsys):
         cli.main(["bgm", "--help"])
     out = capsys.readouterr().out
     assert "--replan" in out and "場面" in out
+
+
+# ---------- レビュー指摘の修正 ----------
+
+
+@needs_ffmpeg
+def test_full_not_built_when_script_has_only_some_chapters(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    rows = [r for r in pipeline.load_book(out_dir)[1] if int(r["chapter"]) == 0]
+    pipeline.write_script(out_dir / "script.tsv", rows)  # script --chapters 1 の後の状態
+    stale = out_dir / "bgm" / f"{out_dir.name}_bgm_full.mp3"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"old")
+    result = build_bgm(cfg, out_dir, deps=make_deps([]))
+    assert len(result.chapter_files) == 1
+    assert result.full_path is None
+    assert not stale.exists()
+
+
+@pytest.mark.parametrize("problem", ["key", "times"])
+def test_precheck_failure_removes_stale_full(tmp_path, problem):
+    cfg, out_dir = make_book(tmp_path, key=problem != "key", times=problem != "times")
+    stale = out_dir / "bgm" / f"{out_dir.name}_bgm_full.mp3"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"old")
+    with pytest.raises((KeyMissing, ValueError)):
+        build_bgm(cfg, out_dir, deps=make_deps([]))
+    assert not stale.exists()
