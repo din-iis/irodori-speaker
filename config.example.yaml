@@ -12,6 +12,11 @@ voice: narrator         # voices/narrator.wav か voices/narrator/ 内の複数�
 ref_normalize_db: -16.0 # null で無効
 max_ref_seconds: null   # null = チェックポイント既定（v4 は 120 秒）
 
+# 読み辞書（漢字表記: よみ の YAML）。本ごとの out/<book>/readings.yaml があれば後勝ちで重ねる
+readings: []            # 例: ["readings.yaml"]
+# 未統合の話者 LoRA のアダプタのディレクトリ（adapter_config.json と adapter_model.safetensors）。null で無効
+lora_adapter: null      # 例: adapters/narrator（voice: none との組み合わせを推奨）
+
 sampling:
   num_steps: null       # null = RF 40 / MeanFlow 4
   t_schedule_mode: linear   # linear | sway

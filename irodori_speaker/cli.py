@@ -7,6 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from .config import Config, load_config
+from .lora import normalize_lora
 from .pipeline import (
     BookResult,
     book_dir,
@@ -26,6 +27,7 @@ TTS_MISSING = (
 
 def _make_synthesizer(cfg: Config, out_dir: Path, voice: str, checkpoint: str | None):
     # torch / irodori_tts が無い環境でも script だけは動くよう遅延 import
+    from .readings import load_readings
     from .synth import Synthesizer
     from .voices import describe_voice, is_no_ref, resolve_voice
 
@@ -36,13 +38,20 @@ def _make_synthesizer(cfg: Config, out_dir: Path, voice: str, checkpoint: str | 
     else:
         voice_paths = resolve_voice(Path(cfg.voices_dir), voice)
         print(f"使う声: {describe_voice(voice_paths)}")
-    return Synthesizer(
+    readings = load_readings(cfg, out_dir)
+    if readings:
+        print(f"読み辞書: {len(readings)} 語")
+    synth = Synthesizer(
         cfg,
         out_dir / "segments",
         voice_paths,
         Path(cfg.output_dir) / ".voices",
         out_dir / "warnings.log",
+        readings=readings,
     )
+    if synth.lora_path:
+        print(f"話者 LoRA: {synth.lora_path}")
+    return synth
 
 
 def _run_script(args, cfg: Config, out_dir: Path) -> int:
@@ -86,6 +95,8 @@ def _run_script(args, cfg: Config, out_dir: Path) -> int:
 def _run_synth(args, cfg: Config, out_dir: Path) -> int:
     if args.checkpoint:
         cfg = replace(cfg, checkpoint=args.checkpoint)
+    if args.lora_adapter:
+        cfg = replace(cfg, lora_adapter=normalize_lora(args.lora_adapter))
     try:
         titles, rows = load_book(out_dir)
     except ValueError as e:
@@ -220,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--force", action="store_true", help="合成済みのセグメントも作り直す")
         p.add_argument("--voice", help="声の名前（config の voice を上書き）。none なら参照音声を使わない")
         p.add_argument("--checkpoint", help="TTS のチェックポイント（config を上書き）")
+        p.add_argument("--lora-adapter", help="話者 LoRA のアダプタディレクトリ（config を上書き）。none で無効")
 
     for name, helptext, opts in (
         ("script", "台本 script.tsv を作る", [script_opts]),

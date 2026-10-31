@@ -109,6 +109,8 @@ class Config:
     empty_cache_interval: int = 10
     voices_dir: str = "voices"
     voice: str | None = None
+    readings: list[str] = field(default_factory=list)
+    lora_adapter: str | None = None
     ref_normalize_db: float | None = -16.0
     max_ref_seconds: float | None = None
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -164,6 +166,9 @@ def _build(cls, data: dict[str, Any]):
         for key, sub in _SECTIONS.items():
             if key in kwargs:
                 kwargs[key] = _build(sub, kwargs[key] or {})
+        readings = kwargs.get("readings", [])
+        if not isinstance(readings, list) or not all(isinstance(r, str) for r in readings):
+            raise ValueError("Config: readings は読み辞書の YAML ファイルのパスのリストにしてください")
         if "emotion_emoji" in kwargs:
             _check_emotion_emoji(kwargs["emotion_emoji"])
     return cls(**kwargs)
