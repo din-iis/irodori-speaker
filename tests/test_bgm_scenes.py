@@ -247,3 +247,13 @@ def test_missing_ambient_query_key_is_invalid(tmp_path):
 def test_scene_schema_objects_forbid_additional_properties():
     assert SCENE_SCHEMA["additionalProperties"] is False
     assert SCENE_SCHEMA["properties"]["scenes"]["items"]["additionalProperties"] is False
+
+
+def test_chapter_paragraphs_skips_break_rows_but_keeps_title():
+    rows = [
+        {"chapter": 0, "para": 0, "seg": 0, "kind": "title", "source": "第一章"},
+        {"chapter": 0, "para": 1, "seg": 0, "kind": "narration", "source": "A"},
+        {"chapter": 0, "para": 2, "seg": 0, "kind": "break", "source": "＊"},
+        {"chapter": 0, "para": 3, "seg": 0, "kind": "narration", "source": "B"},
+    ]
+    assert chapter_paragraphs(rows) == {0: [(0, "第一章"), (1, "A"), (3, "B")]}

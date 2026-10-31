@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
+
 from irodori_speaker.config import DEFAULT_CHAPTER_REGEX
 from irodori_speaker.text_splitter import (
     build_chapters,
     clean_text,
+    is_separator,
     read_text,
     split_chapters,
     split_sentences,
@@ -53,7 +56,8 @@ def test_build_chapters_kinds():
     chapters = build_chapters(read_text(SAMPLE), DEFAULT_CHAPTER_REGEX)
     assert len(chapters) == 2
     first = [s for para in chapters[0].paragraphs for s in para]
-    assert first[0].kind == "narration"
+    assert first[0].kind == "title"
+    assert first[1].kind == "narration"
     assert any(s.kind == "dialogue" and s.text.startswith("「おはよう") for s in first)
     assert any("あじさい" in s.text for s in first)
     assert chapters[1].idx == 1
@@ -142,3 +146,59 @@ def test_max_chars_が_0_以下なら分割は拒否する():
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
+
+
+# ---------- 区切り行・章題 ----------
+
+
+@pytest.mark.parametrize("line", ["＊", "◇　◇　◇", "* * *", "……", "――"])
+def test_is_separator_true(line):
+    assert is_separator(line)
+
+
+@pytest.mark.parametrize("line", ["「……」", "1", "😊", "あ", "（……）", "A"])
+def test_is_separator_false(line):
+    assert not is_separator(line)
+
+
+def _segs(chapter):
+    return [(s.para_idx, s.kind, s.text) for p in chapter.paragraphs for s in p]
+
+
+def test_break_lines_become_one_break_segment(tmp_path):
+    for line in ["＊", "◇　◇　◇", "* * *", "……", "――"]:
+        chapters = build_chapters(f"第一章 題\nあい。\n{line}\nうえ。\n", DEFAULT_CHAPTER_REGEX)
+        assert _segs(chapters[0]) == [
+            (0, "title", "第一章 題"),
+            (1, "narration", "あい。"),
+            (2, "break", line),
+            (3, "narration", "うえ。"),
+        ]
+
+
+def test_consecutive_breaks_merge_and_edges_dropped():
+    text = "第一章 題\n＊\nあい。\n＊\n◇\nうえ。\n＊\n"
+    chapters = build_chapters(text, DEFAULT_CHAPTER_REGEX)
+    assert _segs(chapters[0]) == [
+        (0, "title", "第一章 題"),
+        (1, "narration", "あい。"),
+        (2, "break", "＊"),
+        (3, "narration", "うえ。"),
+    ]
+
+
+def test_chapter_of_only_breaks_is_dropped():
+    text = "第一章 A\n＊\n＊\n第二章 B\nあい。\n"
+    chapters = build_chapters(text, DEFAULT_CHAPTER_REGEX)
+    assert [c.title for c in chapters] == ["第二章 B"]
+
+
+def test_auto_title_is_not_read():
+    chapters = build_chapters("あい。\nうえ。\n", DEFAULT_CHAPTER_REGEX)
+    assert chapters[0].title == "全編"
+    assert _segs(chapters[0])[0] == (0, "narration", "あい。")
+
+
+def test_read_chapter_title_false():
+    chapters = build_chapters("第一章 題\nあい。\n", DEFAULT_CHAPTER_REGEX, read_chapter_title=False)
+    assert _segs(chapters[0]) == [(0, "narration", "あい。")]

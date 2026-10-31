@@ -14,6 +14,9 @@ DIALOGUE_OPEN = "「『"
 _RUBY_EXPLICIT = re.compile(r"[|｜]([^《|｜\n]+)《([^》]+)》")
 _RUBY_KANJI = re.compile(r"([一-龥々〆ヶ]+)《([^》]+)》")
 _AOZORA_NOTE = re.compile(r"［＃[^］]*］")
+_WORD = re.compile(r"\w")
+
+AUTO_TITLES = ("序", "全編")  # split_chapters が付ける題。本文に無いので読まない
 
 
 @dataclass
@@ -21,7 +24,7 @@ class Segment:
     chapter_idx: int  # 0 始まり
     para_idx: int  # 章内の段落番号
     seg_idx: int  # 段落内の文番号
-    kind: str  # "narration" | "dialogue"
+    kind: str  # "narration" | "dialogue" | "title" | "break"
     text: str
 
     @property
@@ -206,11 +209,28 @@ def classify(sentence: str) -> str:
     return "dialogue" if sentence[:1] in DIALOGUE_OPEN else "narration"
 
 
-def build_chapters(text: str, chapter_regex: str, max_chars: int = 120) -> list[Chapter]:
+def is_separator(line: str) -> bool:
+    """文字（かな・漢字・英数字）も括弧も絵文字も含まない行（＊ ◇　◇　◇ …… ―― など）。"""
+    if _WORD.search(line) or any(ch in OPEN_BRACKETS + CLOSE_BRACKETS for ch in line):
+        return False
+    return not emoji_runs(line)
+
+
+def build_chapters(
+    text: str, chapter_regex: str, max_chars: int = 120, *, read_chapter_title: bool = True
+) -> list[Chapter]:
     chapters: list[Chapter] = []
     for c_idx, (title, body) in enumerate(split_chapters(clean_text(text), chapter_regex)):
         paragraphs: list[list[Segment]] = []
+        pending_break: str | None = None  # 本文の後ろに置く区切り（連続は最初の 1 つ）
         for para in split_paragraphs(body):
+            if is_separator(para):
+                if pending_break is None:
+                    pending_break = para
+                continue
+            if pending_break is not None and paragraphs:  # 本文の先頭の区切りは捨てる
+                paragraphs.append([Segment(c_idx, len(paragraphs), 0, "break", pending_break)])
+            pending_break = None
             p_idx = len(paragraphs)
             segs = [
                 Segment(c_idx, p_idx, s_idx, kind, s)
@@ -218,6 +238,12 @@ def build_chapters(text: str, chapter_regex: str, max_chars: int = 120) -> list[
             ]
             if segs:
                 paragraphs.append(segs)
-        if paragraphs:
-            chapters.append(Chapter(c_idx, title, paragraphs))
+        if not paragraphs:
+            continue
+        if read_chapter_title and title not in AUTO_TITLES:
+            paragraphs.insert(0, [Segment(c_idx, 0, 0, "title", title)])
+            for p_i, segs in enumerate(paragraphs):
+                for s in segs:
+                    s.para_idx = p_i
+        chapters.append(Chapter(c_idx, title, paragraphs))
     return chapters

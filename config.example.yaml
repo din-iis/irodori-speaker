@@ -54,10 +54,16 @@ split:
   # chapter_regex: '^\s*第.+?[章話節].*$'
   max_chars: 40          # 長い文は後半で参照音声の声から離れるため、読点の位置で 40 文字以内に分けて合成する
 
-silence:   # 秒
+read_chapter_title: true   # 章の見出しを読み上げる（false で読まない）
+
+silence:   # 秒。文・段落の間と下の特別な間のうち、長い方を入れる
   sentence: 0.25
   paragraph: 0.6
   chapter: 1.0
+  title: 1.0             # 章題の後
+  scene: 2.0             # 区切り行（＊ ◇　◇　◇ …… など）の位置
+  turn: 0.4              # 同じ段落で台詞と地の文が切り替わる所
+  ellipsis: 0.6          # 前の文が … ‥ ― — で終わる所（閉じ括弧の前でも）
 
 bgm:
   secrets_file: ~/.config/irodori-speaker/secrets.env   # FREESOUND_API_KEY=... の 1 行（chmod 600）

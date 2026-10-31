@@ -55,6 +55,8 @@ def chapter_paragraphs(rows: list[dict]) -> dict[int, Paragraphs]:
     """script.tsv の行から、章 → [(para, 段落の原文)]。原文は source 列を seg 順に連結する。"""
     segs: dict[tuple[int, int], list[tuple[int, str]]] = defaultdict(list)
     for r in rows:
+        if r.get("kind") == "break":
+            continue
         segs[(int(r["chapter"]), int(r["para"]))].append((int(r["seg"]), r.get("source", "")))
     out: dict[int, Paragraphs] = defaultdict(list)
     for (chapter, para), items in sorted(segs.items()):
