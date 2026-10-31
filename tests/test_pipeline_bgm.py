@@ -41,15 +41,16 @@ def _sound(sid: int) -> Sound:
 
 
 class FakeClient:
-    def __init__(self, calls: list, error: Exception | None = None):
+    def __init__(self, calls: list, error: Exception | None = None, same_sound: bool = False):
         self.calls = calls
         self.error = error
+        self.same_sound = same_sound
 
     def search(self, query, duration, n):
         self.calls.append(("search", query))
         if self.error is not None:
             raise self.error
-        return [_sound({"rain": 1, "piano": 2}[query])]
+        return [_sound(1 if self.same_sound else {"rain": 1, "piano": 2}[query])]
 
 
 class FakeScorer:
@@ -71,7 +72,9 @@ def gate_chat(cfg, system, user, schema, name):
     return {"results": [{"id": i, "accept": True, "reason": "ok"} for i in ids]}
 
 
-def make_deps(calls: list, *, client_error: Exception | None = None) -> BgmDeps:
+def make_deps(
+    calls: list, *, client_error: Exception | None = None, same_sound: bool = False
+) -> BgmDeps:
     @contextlib.contextmanager
     def server(cfg):
         calls.append("server_enter")
@@ -90,7 +93,7 @@ def make_deps(calls: list, *, client_error: Exception | None = None) -> BgmDeps:
         sf.write(dst, _tone(3.0, 44100), 44100, format="WAV")
 
     return BgmDeps(
-        client_factory=lambda key: FakeClient(calls, client_error),
+        client_factory=lambda key: FakeClient(calls, client_error, same_sound),
         planner_factory=lambda llm, path: ScenePlanner(llm, path, chat=scene_chat),
         gate_factory=lambda llm, path: Gate(llm, path, chat=gate_chat),
         scorer_factory=scorer,
@@ -321,3 +324,41 @@ def test_precheck_failure_removes_stale_full(tmp_path, problem):
     with pytest.raises((KeyMissing, ValueError)):
         build_bgm(cfg, out_dir, deps=make_deps([]))
     assert not stale.exists()
+
+
+@needs_ffmpeg
+def test_same_sound_is_decoded_once_per_chapter(tmp_path, monkeypatch):
+    from irodori_speaker import audio_io
+
+    cfg, out_dir = make_book(tmp_path)
+    decoded: list[str] = []
+    real = audio_io.decode
+
+    def counting(path, sr, channels, *a, **k):
+        decoded.append(Path(path).name)
+        return real(path, sr, channels, *a, **k)
+
+    monkeypatch.setattr(audio_io, "decode", counting)
+    # ambient と intro の両方が同じ ID 1 の音を使う
+    build_bgm(cfg, out_dir, chapters={1}, deps=make_deps([], same_sound=True))
+    assert decoded == ["1.mp3"]
+
+
+@needs_ffmpeg
+def test_credits_written_before_mixing(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    real = bgm_mix.render
+    n = [0]
+
+    def fail_second(*a, **k):
+        n[0] += 1
+        if n[0] == 2:
+            raise RuntimeError("2 章目で失敗")
+        return real(*a, **k)
+
+    monkeypatch.setattr(bgm_mix, "render", fail_second)
+    with pytest.raises(RuntimeError, match="2 章目"):
+        build_bgm(cfg, out_dir, deps=make_deps([]))
+    credits = out_dir / "bgm" / "CREDITS.txt"
+    assert credits.exists()
+    assert "sound 1 by alice" in credits.read_text(encoding="utf-8")

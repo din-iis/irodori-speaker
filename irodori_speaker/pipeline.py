@@ -479,6 +479,8 @@ def _build_bgm(
         del scorer
     bgm_select.write_selection(bgm_dir / "selection.json", choices, set(targets), all_chapters)
     bgm_select.write_missing(bgm_dir / "missing.tsv", choices, scenes)
+    # 重ね合わせの途中で失敗しても、書いた章 MP3 のクレジットが残るよう先に書く
+    bgm_mix.write_credits(bgm_dir / "CREDITS.txt", bgm_select.load_selection(bgm_dir / "selection.json"))
 
     # 5. 章ごとの重ね合わせ
     download = deps.download or freesound.download_preview
@@ -512,6 +514,7 @@ def _build_bgm(
         downloaded: list[Path] = []
         try:
             sounds = {}
+            decoded: dict[int, object] = {}  # 同じ音は章の中で 1 回だけ読む（render は素材を書き換えない）
             for track in [*layout.ambient, *layout.music]:
                 sound = chapter_choices[track.key].sound
                 dst = tmp_dir / f"{sound.id}.mp3"
@@ -523,7 +526,9 @@ def _build_bgm(
                         raise RuntimeError(
                             f"章 {idx + 1} で使う音をダウンロードできませんでした（ID {sound.id}）: {e}"
                         ) from None
-                sounds[track.key] = audio_io.decode(dst, sr, 2)
+                if sound.id not in decoded:
+                    decoded[sound.id] = audio_io.decode(dst, sr, 2)
+                sounds[track.key] = decoded[sound.id]
             import soundfile as sf
 
             narration, _ = sf.read(wav, dtype="float32")
@@ -536,8 +541,7 @@ def _build_bgm(
                 p.unlink(missing_ok=True)
         sig_file.write_text(signature, encoding="utf-8")
 
-    # 6. クレジットと通し
-    bgm_mix.write_credits(bgm_dir / "CREDITS.txt", bgm_select.load_selection(bgm_dir / "selection.json"))
+    # 6. 通し
     # 通しは、章タイトルにある全章の MP3 が今回の署名と一致するときだけ（rows に無い章があれば作らない）
     if (
         chapters is None
