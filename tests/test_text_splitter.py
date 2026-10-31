@@ -202,3 +202,27 @@ def test_auto_title_is_not_read():
 def test_read_chapter_title_false():
     chapters = build_chapters("第一章 題\nあい。\n", DEFAULT_CHAPTER_REGEX, read_chapter_title=False)
     assert _segs(chapters[0]) == [(0, "narration", "あい。")]
+
+
+@pytest.mark.parametrize("line", ["😀", "❤️", "🌸", "☺️"])
+def test_non_palette_emoji_line_is_not_separator(line):
+    assert not is_separator(line)
+
+
+@pytest.mark.parametrize("line", ["★", "☆", "◆", "※", "◇"])
+def test_symbol_lines_are_separators(line):
+    assert is_separator(line)
+
+
+def test_regex_matched_auto_like_title_is_read():
+    chapters = build_chapters("序\nあい。\n", r"^序$")
+    assert _segs(chapters[0])[0] == (0, "title", "序")
+
+
+def test_auto_titles_are_not_read():
+    head = build_chapters("前置き。\n第一章 題\nあい。\n", DEFAULT_CHAPTER_REGEX)
+    assert head[0].title == "序"
+    assert _segs(head[0]) == [(0, "narration", "前置き。")]
+    whole = build_chapters("あい。\n", DEFAULT_CHAPTER_REGEX)
+    assert whole[0].title == "全編"
+    assert _segs(whole[0]) == [(0, "narration", "あい。")]

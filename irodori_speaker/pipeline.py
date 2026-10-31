@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -160,10 +160,9 @@ def annotate_chapters(
     for chapter in chapters:
         paras = chapter.paragraphs
         body = [segs for segs in paras if segs[0].kind not in ("title", "break")]
-        for segs in paras:
-            if segs[0].kind in ("title", "break"):
-                continue
-            b_i = next(i for i, b in enumerate(body) if b is segs)
+        body_pos = {id(b): i for i, b in enumerate(body)}
+        for segs in body:
+            b_i = body_pos[id(segs)]
             prev = body[b_i - 1] if b_i > 0 else None
             nxt = body[b_i + 1] if b_i + 1 < len(body) else None
             kept = all(s.key in saved for s in segs)
@@ -261,14 +260,16 @@ def _match_saved_rows(chapters: list[Chapter], overrides: dict) -> dict[tuple[in
         if r is not None and r["source"] == s.text:
             matched[s.key] = r
             used.add(s.key)
+    unused: dict[tuple[int, str], deque[tuple[int, int, int]]] = defaultdict(deque)
+    for k, r in sorted(overrides.items()):
+        if k not in used:
+            unused[(k[0], r["source"])].append(k)
     for s in segs:
         if s.key in matched:
             continue
-        for k, r in sorted(overrides.items()):
-            if k[0] == s.chapter_idx and k not in used and r["source"] == s.text:
-                matched[s.key] = r
-                used.add(k)
-                break
+        queue = unused.get((s.chapter_idx, s.text))
+        if queue:
+            matched[s.key] = overrides[queue.popleft()]
     return matched
 
 
@@ -424,6 +425,7 @@ def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
     payload = [
         [spoken_text(r) for r in rows],
         [(int(r["para"]), int(r["seg"])) for r in rows],
+        [r.get("kind", "") for r in rows],
         asdict(cfg.sampling),
         asdict(cfg.silence),
         cfg.checkpoint,

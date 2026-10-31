@@ -231,3 +231,27 @@ def test_cli_script_honours_read_chapter_title_false(tmp_path):
     assert cli.main(["script", str(novel), "-c", str(cfg), "--no-emotion"]) == 0
     rows = pipeline.load_script(tmp_path / "out" / "nv" / "script.tsv")
     assert "title" not in {r["kind"] for r in rows.values()}
+
+
+def test_chapter_signature_changes_with_kind_only():
+    rows = [{"chapter": 0, "para": 0, "seg": 0, "kind": "narration", "text": "あ"}]
+    other = [dict(rows[0], kind="title")]
+    cfg = Config()
+    assert pipeline.chapter_signature(rows, cfg, None) != pipeline.chapter_signature(other, cfg, None)
+
+
+def test_match_saved_rows_is_fast_when_everything_shifts():
+    import time
+
+    from irodori_speaker.text_splitter import Chapter, Segment
+
+    n = 6000
+    old = {(0, i, 0): {"source": f"文{i}。", "labels": "", "text": f"文{i}。"} for i in range(n)}
+    # 題の挿入で全段落が 1 つずれる
+    paras = [[Segment(0, 0, 0, "title", "題")]] + [
+        [Segment(0, i + 1, 0, "narration", f"文{i}。")] for i in range(n)
+    ]
+    start = time.perf_counter()
+    got = pipeline._match_saved_rows([Chapter(0, "題", paras)], old)
+    assert time.perf_counter() - start < 1.0
+    assert len(got) == n and got[(0, 5, 0)]["source"] == "文4。"
