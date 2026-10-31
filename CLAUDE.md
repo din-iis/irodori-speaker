@@ -72,6 +72,7 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> 
 - 「台本を作る」「一括実行」の台本部分と「LLM で絵文字を付ける」は、LLM を動かす前に TTS の runtime を GPU から解放する（8GB で両方を載せない）。TTS は次の生成で読み直される。GPU を使う操作は `concurrency_id="gpu"`（上限 1）で直列にする。
 - 「音声にする」は表の編集を `script.tsv` に保存してから `load_book` → `check_vram` → `synthesize_book` を回す。表が空なら `script.tsv` をそのまま使い、無ければ案内して止まる。表で編集できるのは `text` と `seed` 列だけで、他の列は読み込み時の値を使う（`rows_from_dataframe`。`break` 行の `text` は常に空）。「一括実行」の合成は、直前に作った `script.tsv` をそのまま使う。
 - 表の行を選ぶ（`select_row`）とその文のキャッシュ WAV を再生する。選択は Engine を書き換えない（`Engine.peek` と独立した `Synthesizer` でキーを引く。合成中の共有インスタンスの `segments_dir` 等を変えないため）。小説の切り替えで選択は消える。「取り直し」（GPU）は seed を 1 増やしてその文だけ合成し、表の `seed` を更新する（`script.tsv` は「音声にする」が保存する）。「チェック」は `check_book`（ASR なし、GPU なし）。「書き出し」は `build_export`（GPU のキューに入らない。書き出し中に章が書き換わると `build_export` が出力を捨てて止まる）。
+- 「BGM を付ける」（GPU）は `release_tts` → `stream_progress` で `build_bgm`（章の範囲と画面の LLM 設定を渡す。`--replan`・停止・`exclude.txt` の編集は CLI と手書きのまま）。例外は `bgm_error_message`（`KeyMissing` は作り方、`DailyLimit` は翌日の案内、`ImportError` は `cli.BGM_IMPORT_MISSING`）で `gr.Error` にする。結果は `bgm_summary` と通し MP3・章 MP3。
 - 試聴の「生成」「総当たり生成」は、本文を `split_preview_text`（小説生成と同じ `split.max_chars` の分割）で文に分け、文ごとに `generate_once` を呼んで `join_audio` で `silence` の無音を挟んで結合する（長い文は後半で声が崩れるため）。
 - 「停止」は `should_stop` のフラグを立てるだけで、現在の文が終わり次第止まる。文ごとのキャッシュがあるので、再実行で続きから進む。
 - 「声を追加」は `voices/<ID><元の拡張子>` にコピーする。既存の ID は上書きせず拒否する。
@@ -79,7 +80,7 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> 
 
 ### bgm ステップ
 
-`bgm` は `synth` の後に走る独立した工程で、`script.tsv` / `chapters.json` / 章 WAV と `.times.json`・`.sig`（無ければ `synth --chapters N` を案内して止まる）だけを読み、朗読の WAV を書き換えない。入口は `cli._run_bgm` → `pipeline.build_bgm`（`BgmDeps` で LLM・Freesound・CLAP・サーバー・ダウンロードを差し替える。`bgm_*` / `emotion` は関数の中で遅延 import し、`pipeline.py` のトップレベルに置かない）。設計は `docs/superpowers/specs/2026-10-31-bgm-design.md`。
+`bgm` は `synth` の後に走る独立した工程で（CLI の `bgm` と WebUI の「BGM を付ける」が同じ `build_bgm` を呼ぶ。`run` には入れない）、`script.tsv` / `chapters.json` / 章 WAV と `.times.json`・`.sig`（無ければ `synth --chapters N` を案内して止まる）だけを読み、朗読の WAV を書き換えない。入口は `cli._run_bgm` → `pipeline.build_bgm`（`BgmDeps` で LLM・Freesound・CLAP・サーバー・ダウンロードを差し替える。`bgm_*` / `emotion` は関数の中で遅延 import し、`pipeline.py` のトップレベルに置かない）。設計は `docs/superpowers/specs/2026-10-31-bgm-design.md`。
 
 1. `build_bgm` の順序: `load_book` → 対象の章すべてで `bgm_mix.load_times`（無ければ、または `.times.json` の段落番号の並びが今の `script.tsv` と違えば `synth --chapters N` を案内して `ValueError`、LLM を起動する前。段落内の文言だけの変更は検出できない）→ `freesound.load_key`（LLM の前。`KeyMissing`）→ `with LLMServer`: `bgm_scenes`（`ScenePlanner.plan_chapter` → `merge_short` → `scenes.json`）、`bgm_select.search_slots` → `Gate` / `gate_slots` → `gate.tsv`、`unload` → **LLM を解放してから** `ClapScorer` を作り `choose` → `selection.json` / `missing.tsv` → 章ごとに `build_layout` → `render`（同じ音は章の中で 1 回だけデコード）→ `write_mp3` → `.sounds.json` → `.sig` → 通し。`CREDITS.txt` は `build_bgm` の終わりと失敗時（finally）に、`bgm/chapters/` にある `.sounds.json` 付きの全 MP3（章の題名を変えて旧名で残ったものも。titles は使わない）の音の和集合から作り直す（`_write_credits_from_mp3s`）。`missing.tsv` は `--chapters` の一部処理でも他の章の行を消さないよう、書き終えた `selection.json` / `scenes.json` の全章分から作る。
 2. 8GB の GPU に LLM と CLAP を同時に載せない。`ClapScorer` は LLM の `unload` の後に作り、選び終えたら捨てる。torch / transformers は `ClapScorer` の中でだけ import する。
