@@ -29,6 +29,7 @@ class ExportChapter:
     sr: int
     frames: int  # src の frames
     sig: str  # src の .sig の中身
+    stamp: tuple[int, int] = (0, 0)  # src の (st_size, st_mtime_ns)。.sig が同じでも音声の書き直しを検出する
 
 
 def chapter_title(idx: int, title: str) -> str:
@@ -75,9 +76,11 @@ def collect_chapters(inputs: list[ExportInput], rows: list[dict], *, source: str
                 raise ValueError(f"章 {n} の BGM 付き MP3 は作成が完了していません。{bgm_hint}")
             src = mp3
         info = sf.info(str(src))
+        st = src.stat()
         chapters.append(
             ExportChapter(
-                item.idx, item.title, src, info.samplerate, info.frames, _read(_sig_path(src))
+                item.idx, item.title, src, info.samplerate, info.frames, _read(_sig_path(src)),
+                (st.st_size, st.st_mtime_ns),
             )
         )
     rates = {c.sr for c in chapters}
@@ -135,6 +138,7 @@ def export_signature(
 ) -> str:
     payload = [
         [c.sig for c in chapters],
+        [list(c.stamp) for c in chapters],
         [chapter_title(c.idx, c.title) for c in chapters],
         source,
         fmt,

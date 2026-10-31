@@ -709,7 +709,8 @@ def build_export(
             tick("通しを連結")
         sig_file.write_text(signature, encoding="utf-8")
     except BaseException:
-        full.unlink(missing_ok=True)
-        sig_file.unlink(missing_ok=True)
+        # 新旧の章が混ざらないよう、書き出し済みの章 MP3 もすべて消す
+        for p in [full, sig_file, *chapter_paths]:
+            p.unlink(missing_ok=True)
         raise
     return ExportResult(full, chapter_paths, False)

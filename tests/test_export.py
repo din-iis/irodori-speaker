@@ -486,3 +486,66 @@ def test_encode_file_failure_leaves_no_tmp(tmp_path):
         audio_io.encode_file(src, dst, ["-f", "mp3"])
     assert not dst.exists()
     assert not list(dst.parent.glob("*tmp*"))
+
+
+# ---------- 追加修正 1: 入力音声の更新を検出する ----------
+
+
+def test_export_signature_changes_with_input_stamp():
+    base = dict(source="narration", fmt="m4b", bitrate="64k", channels=1)
+    a = [ch(0), ch(1)]
+    assert export.export_signature(a, **base) != export.export_signature(
+        [a[0], replace(a[1], stamp=(10, 20))], **base
+    )
+
+
+def test_collect_chapters_stamps_input_file(tmp_path):
+    _cfg, out_dir = make_book(tmp_path)
+    inputs, rows = inputs_for(out_dir)
+    before = export.collect_chapters(inputs, rows, source="narration")
+    st = inputs[0].wav.stat()
+    assert before[0].stamp == (st.st_size, st.st_mtime_ns)
+    # .sig は同じまま、WAV の mtime だけ変わる（seed: null の synth --force 相当）
+    import os
+
+    os.utime(inputs[0].wav, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    after = export.collect_chapters(inputs, rows, source="narration")
+    base = dict(source="narration", fmt="m4b", bitrate="64k", channels=1)
+    assert export.export_signature(before, **base) != export.export_signature(after, **base)
+
+
+@needs_ffmpeg
+def test_build_export_reencodes_when_wav_rewritten_with_same_sig(tmp_path):
+    import os
+
+    cfg, out_dir = make_book(tmp_path)
+    pipeline.build_export(cfg, out_dir)
+    wav = pipeline._chapter_path(out_dir, 0, pipeline.load_book(out_dir)[0])
+    st = wav.stat()
+    os.utime(wav, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert not pipeline.build_export(cfg, out_dir).skipped
+    assert pipeline.build_export(cfg, out_dir).skipped
+
+
+# ---------- 追加修正 2: mp3 の失敗時に章ファイルも消す ----------
+
+
+@needs_ffmpeg
+def test_build_export_mp3_failure_removes_chapter_files(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    real = audio_io.encode_file
+    calls = []
+
+    def flaky(src, dst, args):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise RuntimeError("ffmpeg が失敗しました")
+        real(src, dst, args)
+
+    monkeypatch.setattr(audio_io, "encode_file", flaky)
+    with pytest.raises(RuntimeError):
+        pipeline.build_export(cfg, out_dir, fmt="mp3")
+    full, chapter_dir = export.export_paths(out_dir, source="narration", fmt="mp3")
+    assert not calls[0].exists()
+    assert not full.exists() and not pipeline._sig_path(full).exists()
+    assert not list(chapter_dir.glob("*.mp3"))
