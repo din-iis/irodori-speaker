@@ -362,3 +362,31 @@ def test_credits_written_before_mixing(tmp_path, monkeypatch):
     credits = out_dir / "bgm" / "CREDITS.txt"
     assert credits.exists()
     assert "sound 1 by alice" in credits.read_text(encoding="utf-8")
+
+
+def test_missing_narration_sig_stops_before_llm(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    titles, _ = pipeline.load_book(out_dir)
+    pipeline._sig_path(pipeline._chapter_path(out_dir, 1, titles)).unlink()
+    calls: list = []
+    with pytest.raises(ValueError, match="章 2 の朗読の署名がありません。synth --chapters 2"):
+        build_bgm(cfg, out_dir, deps=make_deps(calls))
+    assert calls == []
+
+
+@needs_ffmpeg
+def test_failed_remix_removes_old_chapter_mp3_and_sig(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    first = build_bgm(cfg, out_dir, deps=make_deps([]))
+    old = first.chapter_files[0]
+    assert old.exists()
+
+    def boom(*a, **k):
+        raise RuntimeError("render 失敗")
+
+    monkeypatch.setattr(bgm_mix, "render", boom)
+    cfg2 = replace(cfg, bgm=replace(cfg.bgm, ambient_db=-30.0))  # 署名が変わり重ね直しになる
+    with pytest.raises(RuntimeError, match="render 失敗"):
+        build_bgm(cfg2, out_dir, deps=make_deps([]))
+    assert not old.exists()
+    assert not old.with_name(old.name + ".sig").exists()

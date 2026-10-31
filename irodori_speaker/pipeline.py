@@ -416,6 +416,11 @@ def _build_bgm(
                 f"章 {idx + 1} の段落の時刻がありません。synth --chapters {idx + 1} を実行してください"
                 "（文のキャッシュがあるので音声合成はやり直しません）"
             ) from None
+        if not _sig_path(wav).exists():  # synth が途中で止まった章
+            raise ValueError(
+                f"章 {idx + 1} の朗読の署名がありません。synth --chapters {idx + 1} を実行してください"
+                "（文のキャッシュがあるので音声合成はやり直しません）"
+            )
 
     # 2. キー（LLM を起動する前に確かめる）
     key = freesound.load_key(bgm.secrets_file)
@@ -497,9 +502,7 @@ def _build_bgm(
         }
         sig_file = _sig_path(mp3)
         sig_src = _sig_path(wav)
-        narration_sig = (
-            sig_src.read_text(encoding="utf-8").strip() if sig_src.exists() else f"nosig:{frames}"
-        )
+        narration_sig = sig_src.read_text(encoding="utf-8").strip()
         signature = bgm_mix.mix_signature(narration_sig, scenes[idx], chapter_choices, bgm)
         chapter_files.append(mp3)
         signatures[idx] = signature
@@ -510,9 +513,9 @@ def _build_bgm(
         ):
             continue
         sig_file.unlink(missing_ok=True)  # 書き込みに失敗したら stale 扱いにする
-        layout = bgm_mix.build_layout(sr, frames, paras_t, scenes[idx], chapter_choices, bgm)
         downloaded: list[Path] = []
         try:
+            layout = bgm_mix.build_layout(sr, frames, paras_t, scenes[idx], chapter_choices, bgm)
             sounds = {}
             decoded: dict[int, object] = {}  # 同じ音は章の中で 1 回だけ読む（render は素材を書き換えない）
             for track in [*layout.ambient, *layout.music]:
@@ -536,6 +539,9 @@ def _build_bgm(
                 narration = narration[:, 0]
             audio = bgm_mix.render(layout, narration, sounds, sr, bgm)
             audio_io.write_mp3(audio, sr, mp3, bgm.mp3_bitrate)
+        except BaseException:
+            mp3.unlink(missing_ok=True)  # 古い音の MP3 を残さない（CREDITS.txt と食い違うため）
+            raise
         finally:
             for p in downloaded:
                 p.unlink(missing_ok=True)
