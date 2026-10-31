@@ -651,17 +651,26 @@ def build_export(
         raise ValueError(f"形式は {' / '.join(export.FORMATS)} のどちらかにしてください: {fmt}")
     if source not in export.SOURCES:
         raise ValueError(f"source は {' / '.join(export.SOURCES)} のどちらかにしてください: {source}")
-    titles, rows = load_book(out_dir)
-    inputs = []
-    for idx in sorted(titles):
-        wav = _chapter_path(out_dir, idx, titles)
-        mp3 = out_dir / "bgm" / "chapters" / f"{wav.stem}.mp3" if source == "bgm" else None
-        inputs.append(export.ExportInput(idx, titles[idx], wav, mp3))
-    chapters = export.collect_chapters(inputs, rows, source=source)
+    full, chapter_dir = export.export_paths(out_dir, source=source, fmt=fmt)
+    try:
+        titles, rows = load_book(out_dir)
+        inputs = []
+        for idx in sorted(titles):
+            wav = _chapter_path(out_dir, idx, titles)
+            mp3 = out_dir / "bgm" / "chapters" / f"{wav.stem}.mp3" if source == "bgm" else None
+            inputs.append(export.ExportInput(idx, titles[idx], wav, mp3))
+        chapters = export.collect_chapters(inputs, rows, source=source)
+    except BaseException:
+        # 今の本と合わない古い書き出しを使えないよう、今回の source / fmt の出力だけ消す
+        stale = [full, _sig_path(full)]
+        if chapter_dir is not None and chapter_dir.is_dir():
+            stale += chapter_dir.glob("*.mp3")
+        for p in stale:
+            p.unlink(missing_ok=True)
+        raise
 
     book = cfg.export.title or out_dir.name
     channels = 2 if source == "bgm" else 1
-    full, chapter_dir = export.export_paths(out_dir, source=source, fmt=fmt)
     chapter_paths = [export.chapter_mp3_path(chapter_dir, c) for c in chapters] if chapter_dir else []
     signature = export.export_signature(
         chapters, source=source, fmt=fmt, bitrate=bitrate, channels=channels, book=book
@@ -708,6 +717,11 @@ def build_export(
             audio_io.concat_mp3(chapter_paths, full)
             tick("通しを連結")
         sig_file.write_text(signature, encoding="utf-8")
+        if chapter_dir is not None:
+            # 章題の変更・章の削除で残った旧い章 MP3（chapter_dir は export 専用）
+            for p in chapter_dir.glob("*.mp3"):
+                if p not in chapter_paths:
+                    p.unlink(missing_ok=True)
     except BaseException:
         # 新旧の章が混ざらないよう、書き出し済みの章 MP3 もすべて消す
         for p in [full, sig_file, *chapter_paths]:

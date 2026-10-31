@@ -549,3 +549,56 @@ def test_build_export_mp3_failure_removes_chapter_files(tmp_path, monkeypatch):
     assert not calls[0].exists()
     assert not full.exists() and not pipeline._sig_path(full).exists()
     assert not list(chapter_dir.glob("*.mp3"))
+
+
+# ---------- 追加修正 2 ----------
+
+
+@needs_ffmpeg
+def test_build_export_validation_failure_removes_old_outputs(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    m4b = pipeline.build_export(cfg, out_dir)
+    mp3 = pipeline.build_export(cfg, out_dir, fmt="mp3")
+    pipeline._chapter_path(out_dir, 1, pipeline.load_book(out_dir)[0]).unlink()
+    with pytest.raises(ValueError, match="synth --chapters 2"):
+        pipeline.build_export(cfg, out_dir)
+    assert not m4b.path.exists() and not pipeline._sig_path(m4b.path).exists()
+    # 別の形式の出力は消さない
+    assert mp3.path.exists() and all(p.exists() for p in mp3.chapter_files)
+
+
+@needs_ffmpeg
+def test_build_export_mp3_validation_failure_removes_chapter_mp3s(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    mp3 = pipeline.build_export(cfg, out_dir, fmt="mp3")
+    pipeline._chapter_path(out_dir, 1, pipeline.load_book(out_dir)[0]).unlink()
+    with pytest.raises(ValueError):
+        pipeline.build_export(cfg, out_dir, fmt="mp3")
+    assert not mp3.path.exists() and not pipeline._sig_path(mp3.path).exists()
+    assert not any(p.exists() for p in mp3.chapter_files)
+
+
+@needs_ffmpeg
+def test_build_export_mp3_removes_stale_chapter_files(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    first = pipeline.build_export(cfg, out_dir, fmt="mp3")
+    chapter_dir = first.chapter_files[0].parent
+    stale = [chapter_dir / "01_旧題.mp3", chapter_dir / "09_削除した章.mp3", chapter_dir / "02_x.tmp.mp3"]
+    for p in stale:
+        p.write_bytes(b"x")
+    (chapter_dir / "memo.txt").write_text("残す", encoding="utf-8")
+    cfg2 = replace(cfg, export=replace(cfg.export, title="別の題名"))
+    second = pipeline.build_export(cfg2, out_dir, fmt="mp3")
+    assert not second.skipped
+    assert sorted(p.name for p in chapter_dir.glob("*.mp3")) == sorted(p.name for p in second.chapter_files)
+    assert (chapter_dir / "memo.txt").exists()
+
+
+@needs_ffmpeg
+def test_build_export_skip_leaves_chapter_dir_alone(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    first = pipeline.build_export(cfg, out_dir, fmt="mp3")
+    extra = first.chapter_files[0].parent / "05_余り.mp3"
+    extra.write_bytes(b"x")
+    assert pipeline.build_export(cfg, out_dir, fmt="mp3").skipped
+    assert extra.exists()
