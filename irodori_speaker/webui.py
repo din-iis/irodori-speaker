@@ -113,8 +113,8 @@ def bgm_error_message(e: Exception) -> str:
     return str(e)
 
 
-def bgm_summary(result, out_dir: Path) -> str:
-    """build_bgm の結果を状態欄の文にする。"""
+def bgm_summary(result, out_dir: Path, ambient_db: float | None = None, music_db: float | None = None) -> str:
+    """build_bgm の結果を状態欄の文にする。音量を渡すと、使った値を 1 行足す。"""
     bgm_dir = Path(out_dir) / "bgm"
     lines = ["✅ BGM を付けました"]
     if result.full_path:
@@ -123,6 +123,8 @@ def bgm_summary(result, out_dir: Path) -> str:
         lines.append("通しは未作成です（章の範囲で一部の章だけ処理したため）")
     lines.append(f"見つからなかった音: {result.missing} 件（{bgm_dir / 'missing.tsv'}）")
     lines.append(f"クレジット: {bgm_dir / 'CREDITS.txt'}")
+    if ambient_db is not None and music_db is not None:
+        lines.append(f"音量: 環境音 {ambient_db:g} dB / 音楽 {music_db:g} dB（声に対して）")
     return "\n".join(lines)
 
 
@@ -995,7 +997,7 @@ def build_app(cfg: Config):
         note = "（変更なし）" if result.skipped else ""
         return str(result.path), f"✅ 書き出しました{note}: {result.path}"
 
-    def add_bgm(novel_file, novel_text, chapters, api, base_url, model, think, concurrency):
+    def add_bgm(novel_file, novel_text, chapters, api, base_url, model, think, concurrency, ambient_db=None, music_db=None):
         """選んだ小説に bgm を付ける。出力は (状態, 通しの MP3, 章ごとの MP3)。"""
         keep = gr.update()
         try:
@@ -1003,9 +1005,16 @@ def build_app(cfg: Config):
             out_dir = book_dir(cfg, novel)
             yield release_tts(), keep, keep
             overrides = llm_overrides_from_ui(api, base_url, model, think, concurrency)
+            # スライダーの値はこの実行にだけ使う（config.yaml は書き換えない）
+            run_cfg = replace(cfg, bgm=replace(
+                cfg.bgm,
+                ambient_db=cfg.bgm.ambient_db if ambient_db is None else float(ambient_db),
+                music_db=cfg.bgm.music_db if music_db is None else float(music_db),
+            ))
+
             def work(progress):
                 return build_bgm(
-                    cfg, out_dir, chapters=parse_chapter_range(chapters),
+                    run_cfg, out_dir, chapters=parse_chapter_range(chapters),
                     llm_overrides=overrides, progress=progress,
                 )
 
@@ -1021,7 +1030,7 @@ def build_app(cfg: Config):
             print(f"[webui] BGM: {e}")
             raise gr.Error(bgm_error_message(e)) from e
         yield (
-            bgm_summary(result, out_dir),
+            bgm_summary(result, out_dir, run_cfg.bgm.ambient_db, run_cfg.bgm.music_db),
             str(result.full_path) if result.full_path else None,
             [str(p) for p in result.chapter_files],
         )
@@ -1165,6 +1174,12 @@ def build_app(cfg: Config):
 
             with gr.Row():
                 bgm_btn = gr.Button("BGM を付ける（synth 済みの小説に環境音と音楽を重ねる）")
+                bgm_ambient_db = gr.Slider(
+                    -40, 0, step=1, value=cfg.bgm.ambient_db, label="環境音の大きさ（声に対して dB）"
+                )
+                bgm_music_db = gr.Slider(
+                    -40, 0, step=1, value=cfg.bgm.music_db, label="音楽の大きさ（声に対して dB）"
+                )
             bgm_audio = gr.Audio(type="filepath", label="BGM 付きの通し MP3")
             bgm_files = gr.Files(label="BGM 付きの章 MP3")
 
@@ -1184,7 +1199,7 @@ def build_app(cfg: Config):
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):
                 btn.click(make_handler(mode), novel_inputs, novel_outputs, **gpu)
             bgm_btn.click(
-                add_bgm, [novel_file, novel_text, chapters, *llm_inputs],
+                add_bgm, [novel_file, novel_text, chapters, *llm_inputs, bgm_ambient_db, bgm_music_db],
                 [novel_status, bgm_audio, bgm_files], **gpu,
             )
             stop_btn.click(stop_run, None, None)

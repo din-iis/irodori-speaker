@@ -12,11 +12,9 @@ from .assemble import times_path
 from .bgm_types import Choice, Scene, license_label
 from .config import BgmConfig
 
-MIX_RULE = 1
+MIX_RULE = 2  # 2: 音量の物差しを RMS から K 特性の音量（BS.1770）に替えた
 OUTRO_SECONDS = 3.0  # 章末の環境音の余韻
 PEAK_LIMIT = 10 ** (-1 / 20)
-VOICE_FRAME_SECONDS = 0.05
-VOICE_FLOOR_DB = -50.0
 FALLBACK_VOICE_DB = -20.0  # 朗読に音のある部分が無いときの基準
 
 
@@ -130,22 +128,94 @@ def _span_args(s: list[int]) -> tuple[int, int, int, int]:
     return start, end, fade_in, fade_out
 
 
-def rms_db(x: np.ndarray) -> float:
+LOUDNESS_BLOCK_SECONDS = 0.4
+LOUDNESS_OFFSET_DB = -0.691  # BS.1770 の定数。声と素材の両方に同じくかかるので差には効かない
+ABSOLUTE_GATE_DB = -70.0
+RELATIVE_GATE_DB = -10.0
+DUAL_MONO_DB = 10 * np.log10(2)  # モノラルの声を「両チャンネルに同じ信号」として測ったときの差
+_BLOCKS_PER_CHUNK = 256  # rfft を一度にかけるブロック数（長い章でもメモリを食わない）
+
+
+def _k_weight_power(freqs: np.ndarray, sr: int) -> np.ndarray:
+    """BS.1770 の K 特性（高域シェルフ + 低域 RLB ハイパス）の |H(f)|²。
+
+    BS.1770 は 48 kHz の係数だけを定めるので、pyloudnorm と同じ式（双一次変換）で
+    任意の sr 向けの係数を求め、その周波数応答を直接評価する。
+    """
+    w = 2 * np.pi * freqs / sr
+    z1 = np.exp(-1j * w)
+    z2 = z1 * z1
+
+    # 高域シェルフ
+    gain, q, fc = 3.999843853973347, 0.7071752369554196, 1681.9744509555319
+    k = np.tan(np.pi * fc / sr)
+    vh = 10 ** (gain / 20)
+    vb = vh**0.4996667741545416
+    a0 = 1 + k / q + k * k
+    b = ((vh + vb * k / q + k * k) / a0, 2 * (k * k - vh) / a0, (vh - vb * k / q + k * k) / a0)
+    a = (1.0, 2 * (k * k - 1) / a0, (1 - k / q + k * k) / a0)
+    shelf = (b[0] + b[1] * z1 + b[2] * z2) / (a[0] + a[1] * z1 + a[2] * z2)
+
+    # 低域のハイパス
+    q, fc = 0.5003270373238773, 38.13547087602444
+    k = np.tan(np.pi * fc / sr)
+    a0 = 1 + k / q + k * k
+    a = (1.0, 2 * (k * k - 1) / a0, (1 - k / q + k * k) / a0)
+    high = (1 - 2 * z1 + z2) / (a[0] + a[1] * z1 + a[2] * z2)
+
+    return np.abs(shelf * high) ** 2
+
+
+def _block_mean_squares(x: np.ndarray, sr: int) -> np.ndarray:
+    """400 ms のブロックごとの K 重み付き平均二乗（チャンネルの和）。
+
+    フィルタを時間領域でかけず、ブロックの rfft のパワーに |H|² をかけて Parseval で
+    平均二乗を出す。ブロックは重ならない（BS.1770 は 75% 重ねるが、全サンプルを一度ずつ
+    使うほうが速く、定常な環境音や朗読では結果がほぼ変わらない）。末尾の端数は捨てる。
+    ただし全体が 1 ブロックに満たなければ、全体を 1 ブロックとして測る。
+    """
+    if x.ndim == 1:
+        x = x[:, None]
+    block = max(1, round(sr * LOUDNESS_BLOCK_SECONDS))
+    count = len(x) // block
+    if count == 0:
+        block, count = len(x), 1
+    freqs = np.fft.rfftfreq(block, 1 / sr)
+    weight = _k_weight_power(freqs, sr)
+    # rfft の片側スペクトルを両側のパワーに戻す重み（直流とナイキストは 1、他は 2）
+    fold = np.full(len(freqs), 2.0)
+    fold[0] = 1.0
+    if block % 2 == 0:
+        fold[-1] = 1.0
+    weight = weight * fold / (block * block)
+
+    out = np.zeros(count)
+    for ch in range(x.shape[1]):
+        for i in range(0, count, _BLOCKS_PER_CHUNK):
+            n = min(_BLOCKS_PER_CHUNK, count - i)
+            seg = x[i * block : (i + n) * block, ch].astype("float64").reshape(n, block)
+            out[i : i + n] += (np.abs(np.fft.rfft(seg, axis=1)) ** 2) @ weight
+    return out
+
+
+def loudness_db(x: np.ndarray, sr: int) -> float:
+    """BS.1770 の考え方の簡略版の音量（LUFS 相当の dB）。音が無ければ -inf。
+
+    K 特性で重み付けし、絶対ゲート（-70）と相対ゲート（-10）を通ったブロックの平均。
+    ステレオはチャンネルごとの平均二乗の和（BS.1770 と同じ、L/R の重みは 1）で、モノラル
+    はそのまま測る。同じ信号を両チャンネルに入れた音は、モノラルより 3.01 dB 大きくなる。
+    """
     if x.size == 0:
         return -np.inf
-    ms = float(np.mean(np.square(x.astype("float64"))))
-    return 10 * np.log10(ms) if ms > 0 else -np.inf
-
-
-def voice_level_db(narration: np.ndarray, sr: int) -> float:
-    """朗読の音のある部分（50 ms のフレームの RMS が -50 dBFS を超える部分）の RMS。"""
-    n = max(1, round(sr * VOICE_FRAME_SECONDS))
-    count = len(narration) // n
-    if count == 0:
-        return rms_db(narration)
-    frames = narration[: count * n].reshape(count, n)
-    loud = frames[np.mean(np.square(frames.astype("float64")), axis=1) > 10 ** (VOICE_FLOOR_DB / 10)]
-    return rms_db(loud)
+    ms = _block_mean_squares(x, sr)
+    with np.errstate(divide="ignore"):
+        lufs = LOUDNESS_OFFSET_DB + 10 * np.log10(ms)
+    kept = ms[lufs > ABSOLUTE_GATE_DB]
+    if kept.size == 0:
+        return -np.inf
+    relative = LOUDNESS_OFFSET_DB + 10 * np.log10(np.mean(kept)) + RELATIVE_GATE_DB
+    kept = ms[(lufs > ABSOLUTE_GATE_DB) & (lufs > relative)]
+    return float(LOUDNESS_OFFSET_DB + 10 * np.log10(np.mean(kept)))
 
 
 def trim_silence(x: np.ndarray, sr: int, threshold_db: float = -50.0) -> np.ndarray:
@@ -191,7 +261,8 @@ def _track_audio(
     if n <= 0:
         return None
     trimmed = trim_silence(material, sr)
-    material_db = rms_db(trimmed)
+    # 素材はステレオで測る。声は dual mono として測るので（render）、物差しが揃う
+    material_db = loudness_db(trimmed, sr)
     if not np.isfinite(material_db):
         return None
     audio = loop_to(trimmed, n, sr)
@@ -213,7 +284,8 @@ def render(
     bgm: BgmConfig,
 ) -> np.ndarray:
     out = np.zeros((layout.total, 2), dtype="float32")
-    level = voice_level_db(narration, sr)
+    # 声は両チャンネルに同じ信号で入る。ステレオの素材と同じ物差しにするため dual mono として測る
+    level = loudness_db(narration, sr) + DUAL_MONO_DB
     if not np.isfinite(level):
         level = FALLBACK_VOICE_DB
 
