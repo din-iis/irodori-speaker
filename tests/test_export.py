@@ -674,3 +674,21 @@ def test_build_export_succeeds_when_inputs_unchanged(tmp_path):
     cfg, out_dir = make_book(tmp_path)
     result = pipeline.build_export(cfg, out_dir)
     assert result.path.exists() and pipeline._sig_path(result.path).exists()
+
+
+@needs_ffmpeg
+def test_build_export_fails_when_input_sig_disappears_during_export(tmp_path, monkeypatch):
+    """合成側が章を書き直す最中（.sig が一時的に無い）でも、案内付きの RuntimeError で止まる。"""
+    cfg, out_dir = make_book(tmp_path)
+    wav = pipeline._chapter_path(out_dir, 0, pipeline.load_book(out_dir)[0])
+    real = audio_io.write_m4b
+
+    def wrapper(*a, **k):
+        real(*a, **k)
+        pipeline._sig_path(wav).unlink()
+
+    monkeypatch.setattr(audio_io, "write_m4b", wrapper)
+    with pytest.raises(RuntimeError, match="書き出し中に章の音声が更新されました"):
+        pipeline.build_export(cfg, out_dir)
+    full, _ = export.export_paths(out_dir, source="narration", fmt="m4b")
+    assert not full.exists() and not pipeline._sig_path(full).exists()

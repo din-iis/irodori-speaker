@@ -89,14 +89,17 @@ def collect_chapters(inputs: list[ExportInput], rows: list[dict], *, source: str
     return chapters
 
 
-def input_stamps(chapters: list[ExportChapter]) -> list[tuple[tuple[int, int], str]]:
+def input_stamps(chapters: list[ExportChapter]) -> list[tuple[tuple[int, int], str] | None]:
     """各入力の今の (stamp, .sig の中身)。collect_chapters の時点と比べて、書き出し中の更新を検出する。"""
     from .pipeline import _sig_path
 
     result = []
     for c in chapters:
-        st = c.src.stat()
-        result.append(((st.st_size, st.st_mtime_ns), _read(_sig_path(c.src))))
+        try:
+            st = c.src.stat()
+            result.append(((st.st_size, st.st_mtime_ns), _read(_sig_path(c.src))))
+        except OSError:  # 合成側が章 WAV や .sig を書き直している最中（一時的に無い）
+            result.append(None)
     return result
 
 
