@@ -101,6 +101,11 @@ BGM_DAILY_LIMIT = (
 )
 
 
+def bgm_slider_range(value: float, low: int = -40, high: int = 0) -> tuple[int, int]:
+    """BGM の音量スライダーの範囲。config の値が範囲の外でも初期値にできるよう広げる。"""
+    return min(low, math.floor(value)), max(high, math.ceil(value))
+
+
 def bgm_error_message(e: Exception) -> str:
     """build_bgm の例外を画面に出す案内文にする（cli の終了コード別の案内と同じ内容）。"""
     from .cli import BGM_IMPORT_MISSING
@@ -1175,10 +1180,12 @@ def build_app(cfg: Config):
             with gr.Row():
                 bgm_btn = gr.Button("BGM を付ける（synth 済みの小説に環境音と音楽を重ねる）")
                 bgm_ambient_db = gr.Slider(
-                    -40, 0, step=1, value=cfg.bgm.ambient_db, label="環境音の大きさ（声に対して dB）"
+                    *bgm_slider_range(cfg.bgm.ambient_db), step=1, value=cfg.bgm.ambient_db,
+                    label="環境音の大きさ（声に対して dB）",
                 )
                 bgm_music_db = gr.Slider(
-                    -40, 0, step=1, value=cfg.bgm.music_db, label="音楽の大きさ（声に対して dB）"
+                    *bgm_slider_range(cfg.bgm.music_db), step=1, value=cfg.bgm.music_db,
+                    label="音楽の大きさ（声に対して dB）",
                 )
             bgm_audio = gr.Audio(type="filepath", label="BGM 付きの通し MP3")
             bgm_files = gr.Files(label="BGM 付きの章 MP3")

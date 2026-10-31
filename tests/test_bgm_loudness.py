@@ -192,3 +192,12 @@ def test_webui_sliders_start_at_config_values(monkeypatch, tmp_path):
     app = webui.build_app(cfg)
     sliders = [b for b in app.blocks.values() if isinstance(b, gr.Slider) and "声に対して" in (b.label or "")]
     assert sorted(s.value for s in sliders) == sorted([cfg.bgm.ambient_db, cfg.bgm.music_db])
+
+
+def test_bgm_slider_range_は設定値を必ず含む():
+    from irodori_speaker.webui import bgm_slider_range
+
+    assert bgm_slider_range(-20.0) == (-40, 0)
+    assert bgm_slider_range(-45.0) == (-45, 0)
+    assert bgm_slider_range(3.0) == (-40, 3)
+    assert bgm_slider_range(-45.5) == (-46, 0)
