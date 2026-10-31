@@ -482,6 +482,7 @@ def choose(
                     scores[ck(sound)] = float(scorer.score(path, sound.duration, s.clap_text))
                 except Exception as e:  # 壊れた音声 1 つで全体を止めない
                     print(f"[bgm] 採点できませんでした（{sound.id}）: {e}")
+                    path.unlink(missing_ok=True)  # 読めないキャッシュは消し、次の実行で取り直す
             _write_json(scores_path, scores)
 
         scored = [(scores[ck(x)], x) for x in cands if ck(x) in scores]

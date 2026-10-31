@@ -535,3 +535,50 @@ def test_mp3_without_sounds_json_is_remixed(tmp_path, monkeypatch):
     build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
     assert n[0] == 1  # 1 章目だけ重ね直す
     assert ch1.with_name(ch1.name + ".sounds.json").exists()
+
+
+# ---------- レビュー指摘 3 件 ----------
+
+
+@needs_ffmpeg
+def test_credits_include_mp3_left_under_old_chapter_name(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    first = build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    ch1 = first.chapter_files[0]
+    old = ch1.with_name("01_旧題名.mp3")  # 章の題名を変えた後に旧名で残った MP3
+    ch1.rename(old)
+    ch1.with_name(ch1.name + ".sounds.json").rename(old.with_name(old.name + ".sounds.json"))
+    pipeline._write_credits_from_mp3s(out_dir)
+    assert _credit_ids(out_dir) == {1, 2, 3, 4}
+
+
+@needs_ffmpeg
+def test_missing_tsv_keeps_other_chapters_on_partial_run(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    exclude = out_dir / "bgm" / "exclude.txt"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("1\n3\n", encoding="utf-8")  # 1 章目と 2 章目の環境音が all_rejected になる
+    build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    missing = out_dir / "bgm" / "missing.tsv"
+    rows = missing.read_text(encoding="utf-8").splitlines()[1:]
+    assert {r.split("\t")[0] for r in rows} == {"1", "2"}
+    result = build_bgm(cfg, out_dir, chapters={1}, deps=make_deps([], by_chapter=True))
+    rows = missing.read_text(encoding="utf-8").splitlines()[1:]
+    assert {r.split("\t")[0] for r in rows} == {"1", "2"}  # 他の章の行を消さない
+    assert result.missing == 2
+
+
+@needs_ffmpeg
+def test_unreadable_cached_preview_is_removed_and_refetched(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    build_bgm(cfg, out_dir, deps=make_deps([]))
+    cached = Path(cfg.output_dir) / ".freesound" / "previews" / "1.mp3"
+    cached.write_bytes(b"not audio")  # HTTP 200 でも音声として読めない
+    cfg2 = replace(cfg, bgm=replace(cfg.bgm, ambient_db=-30.0))  # 重ね直しになる
+    with pytest.raises(RuntimeError):
+        build_bgm(cfg2, out_dir, deps=make_deps([]))
+    assert not cached.exists()  # 次の実行で取り直す
+    calls: list = []
+    build_bgm(cfg2, out_dir, deps=make_deps(calls))
+    assert calls.count("download") == 1
+    assert cached.exists()

@@ -342,21 +342,17 @@ def _write_credits_from_mp3s(out_dir: Path) -> None:
     bgm_dir = out_dir / "bgm"
     if not (bgm_dir / "chapters").exists():
         return
-    try:
-        titles, _ = load_book(out_dir)
-    except ValueError:
-        return
     choices: list[Choice] = []
-    for idx in sorted(titles):
-        mp3 = bgm_dir / "chapters" / f"{_chapter_path(out_dir, idx, titles).stem}.mp3"
+    # 章の題名の変更・削除で旧名のまま残った MP3 も含め、.sounds.json のある MP3 をすべて集計する
+    for mp3 in sorted((bgm_dir / "chapters").glob("*.mp3")):
         sounds_file = _sounds_path(mp3)
-        if not (mp3.exists() and sounds_file.exists()):
+        if not sounds_file.exists():
             continue
         try:
             sounds = [Sound.from_dict(d) for d in json.loads(sounds_file.read_text(encoding="utf-8"))]
         except (OSError, ValueError, TypeError, KeyError):
             continue
-        choices.extend(Choice(idx, 0, "ambient", "", snd, None, None) for snd in sounds)
+        choices.extend(Choice(0, 0, "ambient", "", snd, None, None) for snd in sounds)
     bgm_mix.write_credits(bgm_dir / "CREDITS.txt", choices)
 
 
@@ -526,7 +522,12 @@ def _build_bgm(
     finally:
         del scorer
     bgm_select.write_selection(bgm_dir / "selection.json", choices, set(targets), all_chapters)
-    bgm_select.write_missing(bgm_dir / "missing.tsv", choices, scenes)
+    # 他の章の行を消さないよう、保存済みの全章分（selection.json / scenes.json）から作る
+    bgm_select.write_missing(
+        bgm_dir / "missing.tsv",
+        bgm_select.load_selection(bgm_dir / "selection.json"),
+        bgm_scenes.load_scenes(bgm_dir / "scenes.json"),
+    )
 
     # 5. 章ごとの重ね合わせ
     download = deps.download or freesound.download_preview
@@ -569,7 +570,11 @@ def _build_bgm(
                         raise RuntimeError(
                             f"章 {idx + 1} で使う音をダウンロードできませんでした（ID {sound.id}）: {e}"
                         ) from None
-                    decoded[sound.id] = audio_io.decode(dst, sr, 2)
+                    try:
+                        decoded[sound.id] = audio_io.decode(dst, sr, 2)
+                    except Exception:
+                        dst.unlink(missing_ok=True)  # 読めないキャッシュは消し、次の実行で取り直す
+                        raise
                     used[sound.id] = sound
                 sounds[track.key] = decoded[sound.id]
             import soundfile as sf

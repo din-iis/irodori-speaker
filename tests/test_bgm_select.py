@@ -572,3 +572,13 @@ def test_choose_keeps_previews_and_reuses_them(tmp_path):
         tmp_path, [s], {s.key: sounds}, {s.key: sounds}, points={1: 0.2, 2: 0.5}, scores="other.json"
     )
     assert download.calls == [] and len(scorer.calls) == 2
+
+
+def test_choose_removes_unreadable_preview_and_skips_candidate(tmp_path):
+    s = slot()
+    sounds = [snd(id=1), snd(id=2)]
+    # ID 1 の採点は例外になる（points に無い）
+    choices, _, _ = run_choose(tmp_path, [s], {s.key: sounds}, {s.key: sounds}, points={2: 0.4})
+    assert choices[0].sound.id == 2
+    assert not (tmp_path / "dl" / "1.mp3").exists()  # 読めなかったキャッシュは消す
+    assert (tmp_path / "dl" / "2.mp3").exists()
