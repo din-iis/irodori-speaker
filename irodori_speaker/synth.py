@@ -10,7 +10,7 @@ import soundfile as sf
 
 from .config import Config
 from .lora import lora_key as _lora_key
-from .lora import resolve_lora_adapter
+from .lora import lora_stamp, resolve_lora_adapter
 from .readings import apply_readings, readings_key as _readings_key
 from .voices import voice_key as _voice_key
 
@@ -271,6 +271,7 @@ class Synthesizer:
         # runtime に触る前に検証する（不足は日本語の ValueError）
         self.lora_path = resolve_lora_adapter(cfg.lora_adapter)
         self.lora_key = _lora_key(self.lora_path) if self.lora_path else None
+        self._lora_stamp = lora_stamp(self.lora_path) if self.lora_path else None
         self.last_warnings: list[str] = []
         # voice_paths が空なら参照音声なし（no_ref=True で合成する）
         self.latent_key = (
@@ -286,6 +287,16 @@ class Synthesizer:
         if self._checkpoint is None:
             self._checkpoint = resolve_checkpoint(self.cfg.checkpoint)
         return load_runtime(self.cfg, self._checkpoint, lora_key=self.lora_key)
+
+    def refresh_lora(self) -> None:
+        """同じパスのアダプタが上書きされていたら lora_key を計算し直す（変わらなければ sha1 は取らない）。"""
+        if self.lora_path is None:
+            return
+        path = resolve_lora_adapter(self.cfg.lora_adapter)
+        stamp = lora_stamp(path)
+        if stamp != self._lora_stamp:
+            self.lora_key = _lora_key(path)
+            self._lora_stamp = stamp
 
     @property
     def readings_key(self) -> str | None:

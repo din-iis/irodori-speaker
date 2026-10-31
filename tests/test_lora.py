@@ -359,3 +359,60 @@ def test_画面の_lora_欄は各_click_の_inputs_末尾にある(monkeypatch, 
             assert f.inputs[-1] is lora
             seen.add(f.fn.__name__)
     assert seen == names
+
+
+# ---- アダプタの上書き検出 ----
+
+
+def test_refresh_lora_は同じパスで重みを書き換えると_lora_key_が変わる(req_synth, tmp_path):
+    d = make_adapter(tmp_path)
+    s = req_synth(Config(device="cpu", lora_adapter=str(d)))
+    before = s.lora_key
+    (d / "adapter_model.safetensors").write_bytes(b"W2-longer")
+    s.refresh_lora()
+    assert s.lora_key != before
+    assert s.lora_key == lora_key(d)
+
+
+def test_refresh_lora_は書き換えが無ければ_sha1_を計算し直さない(req_synth, tmp_path, monkeypatch):
+    d = make_adapter(tmp_path)
+    s = req_synth(Config(device="cpu", lora_adapter=str(d)))
+    calls = []
+    real = synth._lora_key
+    monkeypatch.setattr(synth, "_lora_key", lambda p: (calls.append(p), real(p))[1])
+    s.refresh_lora()
+    s.refresh_lora()
+    assert calls == []
+    (d / "adapter_model.safetensors").write_bytes(b"W3-changed")
+    s.refresh_lora()
+    s.refresh_lora()
+    assert len(calls) == 1
+
+
+def test_refresh_lora_はアダプタが無ければ何もしない(req_synth):
+    s = req_synth()
+    s.refresh_lora()
+    assert s.lora_key is None
+
+
+def test_refresh_lora_はディレクトリが消えていれば日本語で拒否する(req_synth, tmp_path):
+    import shutil
+
+    d = make_adapter(tmp_path)
+    s = req_synth(Config(device="cpu", lora_adapter=str(d)))
+    shutil.rmtree(d)
+    with pytest.raises(ValueError, match="LoRA"):
+        s.refresh_lora()
+
+
+def test_Engine_get_は使い回すときに_refresh_lora_を呼ぶ(tmp_path, monkeypatch):
+    from irodori_speaker.webui import Engine
+
+    d = make_adapter(tmp_path)
+    engine = Engine(replace(Config(device="cpu"), output_dir=str(tmp_path / "out")))
+    key = engine.key_for(None, None, None, "none", str(d))
+    s = engine.get(key, tmp_path / "seg")
+    calls = []
+    monkeypatch.setattr(Synthesizer, "refresh_lora", lambda self: calls.append(self))
+    assert engine.get(key, tmp_path / "seg") is s
+    assert calls == [s]

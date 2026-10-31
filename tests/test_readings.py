@@ -265,3 +265,15 @@ def test_Engine_get_は_out_dir_ごとに辞書を差し替える(tmp_path):
     assert s2 is s1 and s2.readings == {}
     s3 = engine.get(key, tmp_path / "preview")  # 試聴は config の辞書だけ
     assert s3.readings == {}
+
+
+def test_YAML_の構文エラーは日本語の_ValueError_でパスを含む(tmp_path):
+    f = write_yaml(tmp_path / "r.yaml", "花: [はな\n")
+    with pytest.raises(ValueError, match="読み辞書") as e:
+        load_readings(Config(readings=[str(f)]), None)
+    assert str(f) in str(e.value)
+    book = tmp_path / "novel"
+    b = write_yaml(book / "readings.yaml", "花: [はな\n")
+    with pytest.raises(ValueError) as e:
+        load_readings(Config(), book)
+    assert str(b) in str(e.value)

@@ -31,6 +31,17 @@ def resolve_lora_adapter(value: str | None) -> Path | None:
     return path
 
 
+def lora_stamp(path: Path) -> tuple:
+    """設定と重みの (名前, サイズ, mtime_ns)。上書きの検出用で、中身は読まない。"""
+    stamp = []
+    for name in (_CONFIG, *_WEIGHTS):
+        f = Path(path) / name
+        if f.is_file():
+            st = f.stat()
+            stamp.append((name, st.st_size, st.st_mtime_ns))
+    return tuple(stamp)
+
+
 def lora_key(path: Path) -> str:
     """設定と重みのファイル名と中身の sha1（mtime は使わない）。"""
     h = hashlib.sha1()

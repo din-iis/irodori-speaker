@@ -351,6 +351,7 @@ class Engine:
             self._key = key
             self._ready = False
         synth = self._synth
+        synth.refresh_lora()  # 同じパスのアダプタが学習し直されていたら検出する
         synth.segments_dir = Path(segments_dir)
         synth.segments_dir.mkdir(parents=True, exist_ok=True)
         synth.warnings_path = Path(warnings_path) if warnings_path else None

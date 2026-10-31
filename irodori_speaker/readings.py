@@ -13,7 +13,10 @@ BOOK_READINGS = "readings.yaml"
 
 
 def _load_file(path: Path) -> dict[str, str]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        raise ValueError(f"読み辞書の YAML を読めません（書式の誤り）: {path}") from None
     if data is None:
         return {}
     if not isinstance(data, dict):
