@@ -76,6 +76,10 @@ class SilenceConfig:
     sentence: float = 0.25
     paragraph: float = 0.6
     chapter: float = 1.0
+    title: float = 1.0  # 章題の後
+    scene: float = 2.0  # 区切り行の位置
+    turn: float = 0.4  # 同じ段落で台詞と地の文が切り替わる所
+    ellipsis: float = 0.6  # 前の文が …‥―— で終わる所
 
 
 @dataclass
@@ -121,6 +125,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     split: SplitConfig = field(default_factory=SplitConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
+    read_chapter_title: bool = True
     bgm: BgmConfig = field(default_factory=BgmConfig)
     output_dir: str = "out"
 

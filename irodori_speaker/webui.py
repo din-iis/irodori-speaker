@@ -110,7 +110,8 @@ def rows_from_dataframe(df_rows, original_rows: list[dict]) -> list[dict]:
         if original is None:
             raise ValueError(f"台本に無い行です（章 {k[0]} / 段落 {k[1]} / 文 {k[2]}）。台本を読み込み直してください")
         text = r[text_col]
-        result.append({**original, "text": "" if _blank(text) else str(text)})
+        blank = _blank(text) or original.get("kind") == "break"  # 区切りは常に読まない
+        result.append({**original, "text": "" if blank else str(text)})
     return result
 
 

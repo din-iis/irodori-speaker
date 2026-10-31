@@ -46,7 +46,12 @@ def _make_synthesizer(cfg: Config, out_dir: Path, voice: str, checkpoint: str | 
 
 
 def _run_script(args, cfg: Config, out_dir: Path) -> int:
-    chapters = build_chapters(read_text(args.novel), cfg.split.chapter_regex, cfg.split.max_chars)
+    chapters = build_chapters(
+        read_text(args.novel),
+        cfg.split.chapter_regex,
+        cfg.split.max_chars,
+        read_chapter_title=cfg.read_chapter_title,
+    )
     selected = parse_chapter_range(args.chapters)
     if selected is not None:
         chapters = [c for c in chapters if c.idx + 1 in selected]
