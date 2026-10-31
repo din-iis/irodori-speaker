@@ -18,11 +18,13 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from . import check
 from .config import EMOTIONS, Config, load_config
 from .pipeline import (
     TSV_FIELDS,
     book_dir,
     build_script,
+    check_book,
     load_book,
     parse_chapter_range,
     synthesize_book,
@@ -42,6 +44,10 @@ TTS_MISSING = (
     "音声合成には torch と irodori_tts が必要です。"
     "GPU マシンで `uv sync --frozen --extra tts --extra cu128 --extra webui` を実行してください（{err}）"
 )
+
+
+CHECK_VIEW_FIELDS = ["chapter", "para", "seg", "flags", "seconds", "chars", "z", "text"]
+STATIC_COLUMNS = [i for i, f in enumerate(TSV_FIELDS) if f not in ("text", "seed")]  # 表で編集できる列は text と seed
 
 
 # ---- 純粋なヘルパー（gradio / torch 不要） ----
@@ -84,7 +90,7 @@ def llm_overrides_from_ui(api, base_url, model, think, concurrency) -> dict:
 
 
 def dataframe_rows(rows: list[dict]) -> list[list]:
-    return [[r[f] for f in TSV_FIELDS] for r in rows]
+    return [[r.get(f, "") for f in TSV_FIELDS] for r in rows]
 
 
 def _key(chapter, para, seg) -> tuple[int, int, int]:
@@ -92,7 +98,7 @@ def _key(chapter, para, seg) -> tuple[int, int, int]:
 
 
 def rows_from_dataframe(df_rows, original_rows: list[dict]) -> list[dict]:
-    """Dataframe の text 列だけを取り込み、他の列は読み込み時の値を使う。"""
+    """Dataframe の text 列と seed 列だけを取り込み、他の列は読み込み時の値を使う。"""
     if hasattr(df_rows, "values"):  # pandas.DataFrame
         df_rows = df_rows.values.tolist()
     df_rows = [list(r) for r in df_rows]
@@ -103,15 +109,52 @@ def rows_from_dataframe(df_rows, original_rows: list[dict]) -> list[dict]:
         )
     by_key = {_key(r["chapter"], r["para"], r["seg"]): r for r in original_rows}
     text_col = TSV_FIELDS.index("text")
+    seed_col = TSV_FIELDS.index("seed")
     result = []
     for r in df_rows:
         k = _key(r[0], r[1], r[2])
         original = by_key.get(k)
         if original is None:
             raise ValueError(f"台本に無い行です（章 {k[0]} / 段落 {k[1]} / 文 {k[2]}）。台本を読み込み直してください")
-        text = r[text_col]
-        result.append({**original, "text": "" if _blank(text) else str(text)})
+        text, seed = r[text_col], r[seed_col]
+        result.append(
+            {
+                **original,
+                "text": "" if _blank(text) else str(text),
+                "seed": "" if _blank(seed) else str(_to_int(seed)),
+            }
+        )
     return result
+
+
+def next_seed(current, default: int | None) -> int:
+    """取り直しの seed。今の seed に 1 を足す。空なら sampling.seed + 1、それも無ければランダム。"""
+    if not _blank(current):
+        return _to_int(current) + 1
+    return default + 1 if default is not None else random.randrange(2**31)
+
+
+def check_view_rows(rows: list) -> list[list[str]]:
+    """check_book の結果から、印のある行だけを表の列（CHECK_VIEW_FIELDS）にする。"""
+
+    def fmt(value, spec: str) -> str:
+        return "" if value is None else format(value, spec)
+
+    return [
+        [
+            str(r.chapter), str(r.para), str(r.seg), "|".join(r.flags),
+            fmt(r.stats.seconds if r.stats else None, ".2f"), str(r.chars), fmt(r.z, ".2f"), r.text,
+        ]
+        for r in rows
+        if r.flags
+    ]
+
+
+def current_rows(df, original, out_dir: Path) -> list[dict]:
+    """表の今の内容（text / seed の手直しを含む）を行にする。表が空なら script.tsv の行。"""
+    if df is None or len(df) == 0:
+        return original or _existing_rows(out_dir)
+    return rows_from_dataframe(df, original or _existing_rows(out_dir))
 
 
 def emoji_prefixed(text: str, emoji: str) -> str:
@@ -599,6 +642,87 @@ def build_app(cfg: Config):
             raise gr.Error(str(e)) from e
         return rows, f"✅ script.tsv を保存しました: {out_dir / 'script.tsv'}（{len(rows)} 行）"
 
+    # -- 選んだ文の確認・取り直し・チェック --
+
+    def select_row(df, original, novel_file, novel_text, checkpoint, device, precision, voice, evt):
+        keep = gr.update()
+        index = getattr(evt, "index", None)
+        if index is None or isinstance(index, int) or len(index) == 0:
+            return keep, keep, keep
+        idx = index[0]
+        try:
+            out_dir = book_dir(cfg, _novel_path(novel_file, novel_text))
+            rows = current_rows(df, original, out_dir)
+        except ValueError as e:
+            raise gr.Error(str(e)) from e
+        if not 0 <= idx < len(rows):
+            return keep, keep, keep
+        row = rows[idx]
+        if row.get("kind") == "break":
+            return idx, None, "区切り行には音声がありません"
+        key = tts_key(checkpoint, device, precision, voice)
+        try:
+            # モデルは読まない（鍵の計算だけ）
+            synth = engine.get(key, out_dir / "segments", out_dir / "warnings.log")
+            path = synth.segments_dir / f"{check.segment_key(synth, row)}.wav"
+        except ValueError as e:
+            raise gr.Error(str(e)) from e
+        where = f"章 {int(row['chapter']) + 1} / 段落 {int(row['para']) + 1} / 文 {int(row['seg']) + 1}"
+        if path.exists():
+            return idx, str(path), f"{where} の音声（キャッシュ）を表示しました"
+        return idx, None, f"{where} の音声はまだありません（「音声にする」か取り直しで作ります）"
+
+    def retake_row(idx, df, original, novel_file, novel_text, checkpoint, device, precision, voice):
+        keep = gr.update()
+        if idx is None:
+            raise gr.Error("先に台本の表で取り直す文の行をクリックしてください")
+        try:
+            out_dir = book_dir(cfg, _novel_path(novel_file, novel_text))
+            rows = current_rows(df, original, out_dir)
+            if not 0 <= idx < len(rows):
+                raise ValueError("選んだ行が表にありません。もう一度行をクリックしてください")
+            row = rows[idx]
+            if row.get("kind") == "break":
+                raise ValueError("区切り行は取り直せません")
+            key = tts_key(checkpoint, device, precision, voice)
+            new_seed = next_seed(row.get("seed", ""), engine.cfg_for(key).sampling.seed)
+        except ValueError as e:
+            raise gr.Error(str(e)) from e
+        try:
+            step = ensure_loaded(key, out_dir / "segments", out_dir / "warnings.log")
+            try:
+                while True:
+                    yield keep, keep, keep, next(step)
+            except StopIteration as stop:
+                synth = stop.value
+            yield keep, keep, keep, f"🎙 seed={new_seed} で合成中…"
+            path = synth.synthesize(row["text"], force=False, seed=new_seed)
+        except Exception as e:
+            raise fail("取り直しに失敗しました", e) from e
+        rows[idx] = {**row, "seed": str(new_seed)}
+        yield (
+            gr.update(value=dataframe_rows(rows)), rows, str(path),
+            f"seed={new_seed} で合成しました。「音声にする」で章に反映します {warn_note(synth.last_warnings)}",
+        )
+
+    def run_check(novel_file, novel_text, chapters, checkpoint, device, precision, voice, df, original):
+        key = tts_key(checkpoint, device, precision, voice)
+        try:
+            out_dir = book_dir(cfg, _novel_path(novel_file, novel_text))
+            if df is not None and len(df) > 0:  # 表の手直しを保存してから調べる（seed を鍵に使うため）
+                write_script(out_dir / "script.tsv", rows_from_dataframe(df, original or _existing_rows(out_dir)))
+            result = check_book(engine.cfg_for(key), out_dir, chapters=parse_chapter_range(chapters))
+        except (ValueError, RuntimeError) as e:
+            raise gr.Error(str(e)) from e
+        except Exception as e:
+            raise fail("チェックに失敗しました", e) from e
+        return (
+            check_view_rows(result.rows),
+            f"{result.total} 文中 {result.flagged} 件に印（{result.path}）",
+        )
+
+    select_row.__annotations__["evt"] = gr.SelectData  # future annotations で文字列になるのを避ける
+
     def stage_script(novel, out_dir, chapters, no_emotion, reannotate, overrides):
         selected = parse_chapter_range(chapters)
         if not no_emotion and cfg.emotion_mode != "none":
@@ -850,13 +974,22 @@ def build_app(cfg: Config):
                 stop_btn = gr.Button("停止", variant="stop")
             table_kwargs = {}
             if "static_columns" in inspect.signature(gr.Dataframe.__init__).parameters:
-                table_kwargs["static_columns"] = [i for i, f in enumerate(TSV_FIELDS) if f != "text"]
+                table_kwargs["static_columns"] = STATIC_COLUMNS
             table = gr.Dataframe(
                 headers=TSV_FIELDS, datatype="str", type="array", interactive=True, wrap=True,
-                label="台本（text 列だけ編集できます）", **table_kwargs,
+                label="台本（text 列と seed 列だけ編集できます）", **table_kwargs,
             )
             script_rows = gr.State([])
             loaded_novel = gr.State(None)
+            selected_idx = gr.State(None)
+            with gr.Row():
+                seg_audio = gr.Audio(type="filepath", label="選んだ文の音声（キャッシュ）", interactive=False)
+                retake_btn = gr.Button("取り直し（選んだ文を別の seed で合成）")
+                check_btn = gr.Button("チェック（長さ・無音・クリッピング）")
+            check_table = gr.Dataframe(
+                headers=CHECK_VIEW_FIELDS, datatype="str", type="array", interactive=False, wrap=True,
+                label="チェックで印の付いた文（詳細は check.tsv）",
+            )
             save_btn = gr.Button("script.tsv を保存")
             novel_status = gr.Textbox(label="状態", interactive=False)
             chapter_files = gr.Files(label="章ごとの WAV")
@@ -870,6 +1003,22 @@ def build_app(cfg: Config):
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):
                 btn.click(make_handler(mode), novel_inputs, novel_outputs, **gpu)
             stop_btn.click(stop_run, None, None)
+            table.select(
+                select_row,
+                [table, script_rows, novel_file, novel_text, *tts_inputs],
+                [selected_idx, seg_audio, novel_status],
+            )
+            retake_btn.click(
+                retake_row,
+                [selected_idx, table, script_rows, novel_file, novel_text, *tts_inputs],
+                [table, script_rows, seg_audio, novel_status],
+                **gpu,
+            )
+            check_btn.click(
+                run_check,
+                [novel_file, novel_text, chapters, *tts_inputs, table, script_rows],
+                [check_table, novel_status],
+            )
             save_btn.click(save_script, [table, script_rows, novel_file, novel_text], [script_rows, novel_status])
             for trigger in (novel_file.change, novel_text.submit, novel_text.blur):
                 trigger(
