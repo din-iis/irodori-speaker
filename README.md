@@ -113,6 +113,9 @@ uv run --no-sync python -m irodori_speaker synth novel.txt -c config.yaml
 
 # 一括: 1 → 2 を続けて実行（間で LLM を解放してから TTS を読み込む）
 uv run --no-sync python -m irodori_speaker run novel.txt -c config.yaml
+
+# 3. 聴く形式に書き出す: 章マーカー付き M4B（または MP3）→ out/<book>/export/
+uv run --no-sync python -m irodori_speaker export novel.txt -c config.yaml
 ```
 
 `script` は先頭に「N 章 / N 段落 / N 文」を、`synth` は使う声（クリップ数と合計秒数）を表示し、終了時に `warnings.log` の件数を表示します。
@@ -174,6 +177,7 @@ out/
     warnings.log               合成時の警告（文が長すぎて切り詰められた等）
     chapters/NN_タイトル.wav   章ごとの WAV
     <book>_full.wav            全体の WAV
+    export/                    export の出力（<book>.m4b、または chapters/ と <book>.mp3。--bgm は _bgm 付き）
 ```
 
 `--chapters` で一部の章だけ合成したときは、全章の WAV が揃っていて台本と一致している場合にだけ `<book>_full.wav` を作ります。揃っていなければ古い通し WAV は削除されます。
@@ -328,6 +332,31 @@ LLM も TTS のモデルも使わないので、GPU は要りません（`--asr`
 
 悪い文は `script.tsv` の `seed` 列を直して `synth` を再実行します（`seed` は文のキャッシュキーに入るので、直した文だけが作り直しになります）。気に入る声になるまで `seed` を変えて繰り返してください。WebUI ならボタン 1 つで次の `seed` を試せます（後述）。
 
+## 聴く形式に書き出す（export）
+
+章 WAV を、iPhone の Apple Books などで聴きやすい形に書き出します。既定は章マーカー付きの M4B（AAC）で、章の頭に飛べます。MP3 も選べます。Mac は FFmpeg が必要です。
+
+```bash
+uv run --no-sync python -m irodori_speaker export novel.txt -c config.yaml
+uv run --no-sync python -m irodori_speaker export novel.txt --format mp3 --bitrate 96k --bgm
+```
+
+書き出したファイルは AirDrop か「ファイル」アプリ経由で iPhone に移し、Apple Books で開きます。GPU マシンで作った場合は、先に Mac にダウンロードしてください。
+
+| オプション | 内容 |
+|---|---|
+| `--format {m4b,mp3}` | 書き出す形式（`export.format` を上書き）。m4b は `export/<book>.m4b`、mp3 は `export/chapters/NN_タイトル.mp3` と通しの `export/<book>.mp3` |
+| `--bitrate` | ビットレート 例: `64k`（`export.bitrate` を上書き） |
+| `--bgm` | `bgm` で作った BGM 付きの章 MP3 から書き出す（出力は `<book>_bgm.m4b` / `chapters_bgm/` と `<book>_bgm.mp3`、ステレオ） |
+
+設定は `export.*` です。`export.format`（既定 `m4b`）、`export.bitrate`（既定 `64k`。朗読はモノラルなのでサイズ重視にしています）、`export.title`（本の題名。`null` なら小説のファイル名）。章題は `chapters.json` の見出しで、空なら「第N章」にします。
+
+- 前提: 全章の `synth` が済んでいて、章 WAV が今の `script.tsv` と一致していること。足りなければ `synth --chapters N` を案内して止まります。`--bgm` では全章の `bgm` も済んでいる必要があります（`bgm --chapters N`）。常に全章を書き出します。
+- 再実行: 入力・形式・ビットレート・題名が前回と同じなら「変更なし」で、再エンコードしません。書き出しに失敗したときや、章 WAV の欠落などで入力の検証に失敗したときは、今回の形式の古い出力と署名を残しません（他の形式の出力は消しません）。mp3 は、書き出しに成功すると、章題の変更や章の削除で残った旧い章 MP3 を `chapters/`（`--bgm` は `chapters_bgm/`）から消します。
+- BGM 付きの MP3（既定 192k）は再エンコードになるため、音質が落ちます。`--bitrate 96k` 以上を勧めます。
+- 章マーカーの位置は AAC の先頭の遅れで数十ミリ秒ずれることがありますが、章の頭出しには影響しません。
+- 私的な利用に限ります（前の節）。
+
 ## WebUI
 
 試聴（短い文で声・絵文字・パラメータを確認）と、小説全体の生成の両方に使えます。GPU マシンで起動し、Mac のブラウザから開きます。
@@ -377,6 +406,7 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 - **一括実行**: 台本を作り、続けて音声にします。音声にする段階では、直前に作った `script.tsv` をそのまま使います（表の編集は使いません）。
 - **停止**: 現在の文の合成が終わり次第、止まります。文ごとにキャッシュしているので、同じ設定で「音声にする」を押し直すと続きから進みます。一括実行で台本の作成中に押したときは、台本を作り終えたところで止まります。
 - **script.tsv を保存**: 表の編集を `script.tsv` に書き戻します。編集できるのは `text` 列だけで、他の列は読み込み時の値のままです。
+- **書き出し**: 画面下の「書き出し形式」（m4b / mp3）と「BGM 付き」を選んで押すと、`export` と同じ処理をします（章の範囲は無視して全章）。完了すると書き出したファイルをダウンロードできます。GPU は使わないので、他の生成と並行して押せます。
 
 表の `text` 列と `seed` 列の手直しは、CLI の `script.tsv` の手直しと同じ扱いです（前の節を参照）。
 
@@ -387,7 +417,6 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 3. **音声にする**: 表の `seed` を `script.tsv` に保存して合成するので、直した文が章の WAV に反映されます。
 
 **チェック**: `check` と同じ調べ方（`--asr` なし、GPU なし）で、印の付いた文だけを下の表に出します（全行は `check.tsv`）。表を編集していれば、先に `script.tsv` に保存します。
-
 
 ## 設定
 
@@ -415,6 +444,8 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 | `silence.*` | 文 0.25 / 段落 0.6 / 章 1.0 / title 1.0 / scene 2.0 / turn 0.4 / ellipsis 0.6 | 結合時に挟む無音（秒）。文・段落の間と特別な間（title: 章題の後、scene: 区切り行の位置、turn: 同じ段落で台詞と地の文が切り替わる所、ellipsis: 前の文が `…‥―—` で終わる所）のうち**長い方**を入れる |
 | `read_chapter_title` | `true` | 章の見出しを読み上げる（`false` で読まない） |
 | `check.*` | `z_threshold` 3.0 / `cer_threshold` 0.3 / `asr_model` `kotoba-tech/kotoba-whisper-v2.0` / `asr_device` `cuda` | `check` の印の閾値と、`--asr` のモデル・デバイス |
+
+| `export.*` | m4b / 64k / `null` | `export` の形式（`m4b` か `mp3`）・ビットレート・本の題名（`null` は小説のファイル名） |
 | `output_dir` | `out` | 出力先 |
 
 - 設定キーの綴りを間違えると、起動時にエラーで止まります（不明なキーは無視されません）。

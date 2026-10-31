@@ -61,6 +61,10 @@ def write_mp3(audio: np.ndarray, sr: int, path: Path, bitrate: str) -> None:
         raise
 
 
+def _concat_list(paths: list[Path]) -> str:
+    return "".join("file '{}'\n".format(str(p.resolve()).replace("'", "'\\''")) for p in paths)
+
+
 def concat_mp3(paths: list[Path], out: Path) -> None:
     """MP3 を再エンコードせずに連結する。"""
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -68,11 +72,41 @@ def concat_mp3(paths: list[Path], out: Path) -> None:
     try:
         with tempfile.TemporaryDirectory() as d:
             lst = Path(d) / "list.txt"
-            lst.write_text(
-                "".join("file '{}'\n".format(str(p.resolve()).replace("'", "'\\''")) for p in paths),
-                encoding="utf-8",
-            )
+            lst.write_text(_concat_list(paths), encoding="utf-8")
             _run(["-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", "-f", "mp3", str(tmp)])
+        tmp.replace(out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def encode_file(src: Path, dst: Path, args: list[str]) -> None:
+    """src を ffmpeg の args でエンコードして dst に書く（一時ファイル経由）。"""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f"{dst.stem}.tmp{dst.suffix}")
+    try:
+        _run(["-y", "-i", str(src), *args, str(tmp)])
+        tmp.replace(dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_m4b(inputs: list[Path], metadata: str, out: Path, bitrate: str, channels: int) -> None:
+    """章 WAV / MP3 を連結して AAC にし、ffmetadata の章マーカーを付けた M4B を書く。"""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(f"{out.stem}.tmp.m4b")
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            lst, meta = Path(d) / "list.txt", Path(d) / "meta.txt"
+            lst.write_text(_concat_list(inputs), encoding="utf-8")
+            meta.write_text(metadata, encoding="utf-8")
+            _run([
+                "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-f", "ffmetadata", "-i", str(meta),
+                "-map", "0:a", "-map_metadata", "1", "-map_chapters", "1",
+                "-c:a", "aac", "-b:a", bitrate, "-ac", str(channels),
+                "-movflags", "+faststart", "-f", "ipod", str(tmp),
+            ])
         tmp.replace(out)
     except BaseException:
         tmp.unlink(missing_ok=True)
