@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import check
 from .config import EMOTIONS, Config, load_config
+from .lora import normalize_lora
 from .pipeline import (
     TSV_FIELDS,
     book_dir,
@@ -30,6 +31,7 @@ from .pipeline import (
     synthesize_book,
     write_script,
 )
+from .readings import load_readings
 from .voices import AUDIO_EXTS, NO_REF_VOICE, is_no_ref, list_voices
 
 CHECKPOINT_CHOICES = [
@@ -117,10 +119,11 @@ def rows_from_dataframe(df_rows, original_rows: list[dict]) -> list[dict]:
         if original is None:
             raise ValueError(f"台本に無い行です（章 {k[0]} / 段落 {k[1]} / 文 {k[2]}）。台本を読み込み直してください")
         text, seed = r[text_col], r[seed_col]
+        blank = _blank(text) or original.get("kind") == "break"  # 区切りは常に読まない
         result.append(
             {
                 **original,
-                "text": "" if _blank(text) else str(text),
+                "text": "" if blank else str(text),
                 "seed": "" if _blank(seed) else str(_to_int(seed)),
             }
         )
@@ -338,7 +341,7 @@ class Engine:
         self._key: tuple | None = None
         self._ready = False
 
-    def key_for(self, checkpoint, device, precision, voice) -> tuple:
+    def key_for(self, checkpoint, device, precision, voice, lora_adapter=None) -> tuple:
         voice = (voice or "").strip()
         if not voice:
             raise ValueError("声を選んでください（voices/ に音声を置くか、画面からアップロードしてください）")
@@ -347,11 +350,16 @@ class Engine:
             device or self.cfg.device,
             precision or self.cfg.precision,
             voice,
+            # 空欄は config、入力があれば none 系は None（config を打ち消す）
+            normalize_lora(lora_adapter) if (lora_adapter or "").strip() else normalize_lora(self.cfg.lora_adapter),
         )
 
     def cfg_for(self, key: tuple) -> Config:
-        checkpoint, device, precision, voice = key
-        return replace(self.cfg, checkpoint=checkpoint, device=device, precision=precision, voice=voice)
+        checkpoint, device, precision, voice, lora_adapter = key
+        return replace(
+            self.cfg, checkpoint=checkpoint, device=device, precision=precision, voice=voice,
+            lora_adapter=lora_adapter,
+        )
 
     def is_loaded(self, key: tuple) -> bool:
         return self._ready and self._key == key
@@ -366,7 +374,9 @@ class Engine:
         self._key = None
         self._ready = False
 
-    def get(self, key: tuple, segments_dir: Path, warnings_path: Path | None = None):
+    def get(
+        self, key: tuple, segments_dir: Path, warnings_path: Path | None = None, out_dir: Path | None = None
+    ):
         # torch / irodori_tts が無い環境でも画面だけは出せるよう遅延 import
         from .synth import Synthesizer
         from .voices import describe_voice, resolve_voice
@@ -385,13 +395,17 @@ class Engine:
             self._key = key
             self._ready = False
         synth = self._synth
+        synth.refresh_lora()  # 同じパスのアダプタが学習し直されていたら検出する
         synth.segments_dir = Path(segments_dir)
         synth.segments_dir.mkdir(parents=True, exist_ok=True)
         synth.warnings_path = Path(warnings_path) if warnings_path else None
+        synth.readings = load_readings(cfg, out_dir)  # Synthesizer は使い回すが、辞書は本ごと
         return synth
 
-    def load(self, key: tuple, segments_dir: Path, warnings_path: Path | None = None):
-        synth = self.get(key, segments_dir, warnings_path)
+    def load(
+        self, key: tuple, segments_dir: Path, warnings_path: Path | None = None, out_dir: Path | None = None
+    ):
+        synth = self.get(key, segments_dir, warnings_path, out_dir)
         if not self._ready:
             synth.runtime  # noqa: B018 モデルを読み込む（キーが変わるときは VRAM を確認する）
             synth.latent_path  # noqa: B018 参照音声を潜在表現に変換する
@@ -426,15 +440,15 @@ def build_app(cfg: Config):
             return gr.Error(TTS_MISSING.format(err=e))
         return gr.Error(f"{prefix}: {e}")
 
-    def ensure_loaded(key, segments_dir, warnings_path=None):
+    def ensure_loaded(key, segments_dir, warnings_path=None, out_dir=None):
         """読み込みが必要なら状態を yield してから読み込み、Synthesizer を返す。"""
         if not engine.is_loaded(key):
             yield f"⏳ モデルを読み込み中: {key[0]}（初回は数分かかります。完了まで他の操作は待ってください）"
             t0 = time.perf_counter()
-            synth = engine.load(key, segments_dir, warnings_path)
+            synth = engine.load(key, segments_dir, warnings_path, out_dir)
             yield f"✅ 読み込み完了 ({time.perf_counter() - t0:.0f}秒): {key[0]} / {key[1]} / {key[2]} / 声 {key[3]}"
             return synth
-        return engine.load(key, segments_dir, warnings_path)
+        return engine.load(key, segments_dir, warnings_path, out_dir)
 
     def release_tts() -> str:
         """LLM を動かす前に TTS の runtime を GPU から外す（8GB では両方載らない）。"""
@@ -445,9 +459,9 @@ def build_app(cfg: Config):
         print("[webui] TTS を解放しました")
         return "🧹 TTS を解放しました"
 
-    def tts_key(checkpoint, device, precision, voice):
+    def tts_key(checkpoint, device, precision, voice, lora_adapter=None):
         try:
-            return engine.key_for(checkpoint, device, precision, voice)
+            return engine.key_for(checkpoint, device, precision, voice, lora_adapter)
         except ValueError as e:
             raise gr.Error(str(e)) from e
 
@@ -465,8 +479,8 @@ def build_app(cfg: Config):
         print(f"[webui] 声を追加しました: {dest}")
         return gr.update(choices=voice_choices(voices_dir), value=dest.stem), f"✅ 声を追加しました: {dest}"
 
-    def load_model(checkpoint, device, precision, voice):
-        key = tts_key(checkpoint, device, precision, voice)
+    def load_model(checkpoint, device, precision, voice, lora_adapter=None):
+        key = tts_key(checkpoint, device, precision, voice, lora_adapter)
         try:
             for msg in ensure_loaded(key, preview_dir):
                 yield msg
@@ -542,10 +556,13 @@ def build_app(cfg: Config):
     def warn_note(warnings):
         return f"（警告 {len(warnings)} 件: {warnings[-1]}）" if warnings else ""
 
-    def generate(text, checkpoint, device, precision, voice, steps, cfg_text, cfg_speaker, duration, seed):
+    def generate(
+        text, checkpoint, device, precision, voice, steps, cfg_text, cfg_speaker, duration, seed,
+        lora_adapter=None,
+    ):
         if not (text or "").strip():
             raise gr.Error("本文を入力してください")
-        key = tts_key(checkpoint, device, precision, voice)
+        key = tts_key(checkpoint, device, precision, voice, lora_adapter)
         seed_value, overrides = sampling_args(steps, cfg_text, cfg_speaker, duration, seed)
         try:
             synth = yield from _with_status(ensure_loaded(key, preview_dir))
@@ -576,14 +593,14 @@ def build_app(cfg: Config):
 
     def compare_emotions(
         text, checkpoint, device, precision, voice, steps, cfg_text, cfg_speaker, duration, seed, intensity,
-        progress=gr.Progress(),
+        lora_adapter=None, progress=gr.Progress(),
     ):
         # 同じ seed・同じ本文で、文頭の絵文字だけ変える。差が出なければ絵文字が効いていない
         from .emotion import Annotation, to_emoji
 
         if not (text or "").strip():
             raise gr.Error("本文を入力してください")
-        key = tts_key(checkpoint, device, precision, voice)
+        key = tts_key(checkpoint, device, precision, voice, lora_adapter)
         seed_value, overrides = sampling_args(steps, cfg_text, cfg_speaker, duration, seed)
         n = len(EMOTIONS)
         results = [gr.update()] * n
@@ -750,10 +767,11 @@ def build_app(cfg: Config):
         return load_book(out_dir)[1]
 
     def stage_synth(
-        out_dir, chapters, force, checkpoint, device, precision, voice, df, original, progress
+        out_dir, chapters, force, checkpoint, device, precision, voice, df, original, progress,
+        lora_adapter=None,
     ):
         """(status, outputs) を yield する。outputs は終了時のみ (章 WAV, 全体 WAV)。"""
-        key = tts_key(checkpoint, device, precision, voice)
+        key = tts_key(checkpoint, device, precision, voice, lora_adapter)
         script_path = out_dir / "script.tsv"
         if df is not None:
             rows = rows_from_dataframe(df, original or _existing_rows(out_dir))
@@ -762,7 +780,9 @@ def build_app(cfg: Config):
         selected = parse_chapter_range(chapters)
         synth_cfg = engine.cfg_for(key)
         try:
-            synth = yield from _bare(ensure_loaded(key, out_dir / "segments", out_dir / "warnings.log"))
+            synth = yield from _bare(
+                ensure_loaded(key, out_dir / "segments", out_dir / "warnings.log", out_dir)
+            )
         except RuntimeError as e:  # VRAM 不足など
             print(f"[webui] 中止: {e}")
             yield f"❌ {e}", None
@@ -811,7 +831,7 @@ def build_app(cfg: Config):
 
     def run_novel(mode, novel_file, novel_text, chapters, no_emotion, reannotate, force, checkpoint, device,
                   precision, voice, api, base_url, model, think, concurrency, df, original,
-                  progress=gr.Progress()):
+                  lora_adapter=None, progress=gr.Progress()):
         """mode: script | synth | all。出力は (状態, 表, 台本の行, 章 WAV, 全体 WAV)。"""
         keep = gr.update()
         stop_flag.clear()
@@ -838,7 +858,8 @@ def build_app(cfg: Config):
                         raise ValueError(f"先に台本を作ってください: {out_dir / 'script.tsv'}")
                     df, original = None, None  # 表が空なら script.tsv をそのまま使う
                 for status, outputs in stage_synth(
-                    out_dir, chapters, force, checkpoint, device, precision, voice, df, original, progress
+                    out_dir, chapters, force, checkpoint, device, precision, voice, df, original, progress,
+                    lora_adapter=lora_adapter,
                 ):
                     files, full = outputs if outputs else (keep, keep)
                     yield status, table, rows_state, files, full
@@ -888,6 +909,9 @@ def build_app(cfg: Config):
                 voice = gr.Dropdown(
                     voice_choices(voices_dir), value=cfg.voice, allow_custom_value=True, label="声", scale=3
                 )
+                lora = gr.Textbox(
+                    value=cfg.lora_adapter or "", label="話者 LoRA のアダプタ（空で config、none で無効）", scale=2
+                )
                 refresh_btn = gr.Button("更新", scale=1)
                 load_btn = gr.Button("モデル読み込み", variant="primary", scale=1)
             with gr.Row():
@@ -912,10 +936,11 @@ def build_app(cfg: Config):
             llm_status = gr.Textbox(label="LLM の状態", interactive=False)
         llm_inputs = [api, base_url, model, think, concurrency]
         tts_inputs = [checkpoint, device, precision, voice]
+        lora_inputs = [lora]  # 各 click の inputs の末尾に足す（ハンドラ末尾の kwarg に対応）
 
         refresh_btn.click(refresh_voices, voice, voice)
         add_voice_btn.click(upload_voice, [voice_audio, voice_id], [voice, tts_status])
-        load_btn.click(load_model, tts_inputs, tts_status, **gpu)
+        load_btn.click(load_model, [*tts_inputs, *lora_inputs], tts_status, **gpu)
         fetch_btn.click(fetch_models, [api, base_url, model], [model, llm_status])
 
         with gr.Tab("試聴"):
@@ -945,14 +970,16 @@ def build_app(cfg: Config):
             preview_status = gr.Textbox(label="状態（seed・所要時間・警告）", interactive=False)
             sampling_inputs = [steps, cfg_text, cfg_speaker, duration, seed]
             annotate_btn.click(annotate_text, [text, *llm_inputs], [text, preview_status], **gpu)
-            gen_btn.click(generate, [text, *tts_inputs, *sampling_inputs], [audio, preview_status], **gpu)
+            gen_btn.click(
+                generate, [text, *tts_inputs, *sampling_inputs, *lora_inputs], [audio, preview_status], **gpu
+            )
             gr.Markdown("### 感情プリセット総当たり\n同じ seed・同じ本文で、文頭に各感情の絵文字を付けて 10 本生成します。")
             brute_intensity = gr.Slider(1, 3, value=3, step=1, label="強度")
             brute_btn = gr.Button("総当たり生成")
             brute_outs = [gr.Audio(label=e) for e in EMOTIONS]
             brute_btn.click(
                 compare_emotions,
-                [text, *tts_inputs, *sampling_inputs, brute_intensity],
+                [text, *tts_inputs, *sampling_inputs, brute_intensity, *lora_inputs],
                 [*brute_outs, preview_status],
                 **gpu,
             )
@@ -997,7 +1024,7 @@ def build_app(cfg: Config):
 
             novel_inputs = [
                 novel_file, novel_text, chapters, no_emotion, reannotate, force,
-                *tts_inputs, *llm_inputs, table, script_rows,
+                *tts_inputs, *llm_inputs, table, script_rows, *lora_inputs,
             ]
             novel_outputs = [novel_status, table, script_rows, chapter_files, full_audio, loaded_novel]
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):

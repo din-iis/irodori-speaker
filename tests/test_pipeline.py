@@ -229,16 +229,16 @@ def test_manual_edit_kept_per_row_within_changed_paragraph(tmp_path, fake_emotio
     pipeline.build_script(NOVEL, cfg, out)
     script = out / "script.tsv"
     rows = pipeline.load_script(script)
-    assert (0, 0, 1) in rows
-    rows[(0, 0, 1)]["text"] = "手直し済み"
+    assert (0, 1, 1) in rows
+    rows[(0, 1, 1)]["text"] = "手直し済み"
     pipeline.write_script(script, [r for _, r in sorted(rows.items())])
 
     changed = tmp_path / "changed.txt"
     changed.write_text(read_text(NOVEL).replace("雨が降っていた。", "雨が止んでいた。"), encoding="utf-8")
     pipeline.build_script(changed, cfg, out)
     saved = pipeline.load_script(script)
-    assert saved[(0, 0, 1)]["text"] == "手直し済み"
-    assert saved[(0, 0, 0)]["source"] == "雨が止んでいた。"
+    assert saved[(0, 1, 1)]["text"] == "手直し済み"
+    assert saved[(0, 1, 0)]["source"] == "雨が止んでいた。"
     assert any("雨が止んでいた" in t for t in fake_emotion.annotated_texts)
 
 

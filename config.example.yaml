@@ -12,6 +12,11 @@ voice: narrator         # voices/narrator.wav か voices/narrator/ 内の複数�
 ref_normalize_db: -16.0 # null で無効
 max_ref_seconds: null   # null = チェックポイント既定（v4 は 120 秒）
 
+# 読み辞書（漢字表記: よみ の YAML）。本ごとの out/<book>/readings.yaml があれば後勝ちで重ねる
+readings: []            # 例: ["readings.yaml"]
+# 未統合の話者 LoRA のアダプタのディレクトリ（adapter_config.json と adapter_model.safetensors）。null で無効
+lora_adapter: null      # 例: adapters/narrator（voice: none との組み合わせを推奨）
+
 sampling:
   num_steps: null       # null = RF 40 / MeanFlow 4
   t_schedule_mode: linear   # linear | sway
@@ -54,10 +59,16 @@ split:
   # chapter_regex: '^\s*第.+?[章話節].*$'
   max_chars: 40          # 長い文は後半で参照音声の声から離れるため、読点の位置で 40 文字以内に分けて合成する
 
-silence:   # 秒
+read_chapter_title: true   # 章の見出しを読み上げる（false で読まない）
+
+silence:   # 秒。文・段落の間と下の特別な間のうち、長い方を入れる
   sentence: 0.25
   paragraph: 0.6
   chapter: 1.0
+  title: 1.0             # 章題の後
+  scene: 2.0             # 区切り行（＊ ◇　◇　◇ …… など）の位置
+  turn: 0.4              # 同じ段落で台詞と地の文が切り替わる所
+  ellipsis: 0.6          # 前の文が … ‥ ― — で終わる所（閉じ括弧の前でも）
 
 bgm:
   secrets_file: ~/.config/irodori-speaker/secrets.env   # FREESOUND_API_KEY=... の 1 行（chmod 600）

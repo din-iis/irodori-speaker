@@ -14,6 +14,7 @@ DIALOGUE_OPEN = "「『"
 _RUBY_EXPLICIT = re.compile(r"[|｜]([^《|｜\n]+)《([^》]+)》")
 _RUBY_KANJI = re.compile(r"([一-龥々〆ヶ]+)《([^》]+)》")
 _AOZORA_NOTE = re.compile(r"［＃[^］]*］")
+_WORD = re.compile(r"\w")
 
 
 @dataclass
@@ -21,7 +22,7 @@ class Segment:
     chapter_idx: int  # 0 始まり
     para_idx: int  # 章内の段落番号
     seg_idx: int  # 段落内の文番号
-    kind: str  # "narration" | "dialogue"
+    kind: str  # "narration" | "dialogue" | "title" | "break"
     text: str
 
     @property
@@ -55,18 +56,23 @@ def clean_text(text: str) -> str:
 
 def split_chapters(text: str, chapter_regex: str) -> list[tuple[str, str]]:
     """(タイトル, 本文) のリスト。見出しが無ければ全体を 1 章とする。"""
+    return [(title, body) for title, body, _ in _split_chapters_marked(text, chapter_regex)]
+
+
+def _split_chapters_marked(text: str, chapter_regex: str) -> list[tuple[str, str, bool]]:
+    """(タイトル, 本文, 自動で付けた題か)。自動の題（「序」「全編」）は本文に無いので読まない。"""
     pattern = re.compile(chapter_regex, re.MULTILINE)
     matches = list(pattern.finditer(text))
     if not matches:
-        return [("全編", text)]
-    chapters: list[tuple[str, str]] = []
+        return [("全編", text, True)]
+    chapters: list[tuple[str, str, bool]] = []
     head = text[: matches[0].start()]
     if head.strip():
-        chapters.append(("序", head))
+        chapters.append(("序", head, True))
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         title = m.group(0).strip()
-        chapters.append((title, text[m.end() : end]))
+        chapters.append((title, text[m.end() : end], False))
     return chapters
 
 
@@ -206,11 +212,31 @@ def classify(sentence: str) -> str:
     return "dialogue" if sentence[:1] in DIALOGUE_OPEN else "narration"
 
 
-def build_chapters(text: str, chapter_regex: str, max_chars: int = 120) -> list[Chapter]:
+def is_separator(line: str) -> bool:
+    """文字（かな・漢字・英数字）も括弧も絵文字も含まない行（＊ ◇　◇　◇ …… ―― など）。"""
+    if _WORD.search(line) or any(ch in OPEN_BRACKETS + CLOSE_BRACKETS for ch in line):
+        return False
+    # パレット外の絵文字（😀 ❤️ 🌸 など）も区切りにしない。★ ☆ ◆ ※ などの記号は区切り
+    if any(ord(ch) >= 0x1F000 or ch == "\ufe0f" for ch in line):
+        return False
+    return not emoji_runs(line)
+
+
+def build_chapters(
+    text: str, chapter_regex: str, max_chars: int = 120, *, read_chapter_title: bool = True
+) -> list[Chapter]:
     chapters: list[Chapter] = []
-    for c_idx, (title, body) in enumerate(split_chapters(clean_text(text), chapter_regex)):
+    for c_idx, (title, body, is_auto) in enumerate(_split_chapters_marked(clean_text(text), chapter_regex)):
         paragraphs: list[list[Segment]] = []
+        pending_break: str | None = None  # 本文の後ろに置く区切り（連続は最初の 1 つ）
         for para in split_paragraphs(body):
+            if is_separator(para):
+                if pending_break is None:
+                    pending_break = para
+                continue
+            if pending_break is not None and paragraphs:  # 本文の先頭の区切りは捨てる
+                paragraphs.append([Segment(c_idx, len(paragraphs), 0, "break", pending_break)])
+            pending_break = None
             p_idx = len(paragraphs)
             segs = [
                 Segment(c_idx, p_idx, s_idx, kind, s)
@@ -218,6 +244,12 @@ def build_chapters(text: str, chapter_regex: str, max_chars: int = 120) -> list[
             ]
             if segs:
                 paragraphs.append(segs)
-        if paragraphs:
-            chapters.append(Chapter(c_idx, title, paragraphs))
+        if not paragraphs:
+            continue
+        if read_chapter_title and not is_auto:
+            paragraphs.insert(0, [Segment(c_idx, 0, 0, "title", title)])
+            for p_i, segs in enumerate(paragraphs):
+                for s in segs:
+                    s.para_idx = p_i
+        chapters.append(Chapter(c_idx, title, paragraphs))
     return chapters

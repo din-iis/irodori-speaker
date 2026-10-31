@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from irodori_speaker.config import EMOTIONS, load_config
+from irodori_speaker.config import EMOTIONS, Config, load_config
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -107,3 +107,9 @@ def test_check_節を読める(tmp_path):
     cfg = load_config(p)
     assert cfg.check.z_threshold == 2.5 and cfg.check.asr_device == "cpu"
     assert load_config(ROOT / "config.example.yaml").check.z_threshold == 3.0
+
+
+def test_scene_defaults():
+    cfg = Config()
+    assert cfg.read_chapter_title is True
+    assert (cfg.silence.title, cfg.silence.scene, cfg.silence.turn, cfg.silence.ellipsis) == (1.0, 2.0, 0.4, 0.6)

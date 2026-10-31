@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -118,7 +118,12 @@ def build_script(
     progress: Progress | None = None,
 ) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    built = build_chapters(read_text(novel), cfg.split.chapter_regex, cfg.split.max_chars)
+    built = build_chapters(
+        read_text(novel),
+        cfg.split.chapter_regex,
+        cfg.split.max_chars,
+        read_chapter_title=cfg.read_chapter_title,
+    )
     (out_dir / "chapters.json").write_text(
         json.dumps(
             {"chapters": [{"idx": c.idx, "title": c.title} for c in built]},
@@ -158,26 +163,28 @@ def annotate_chapters(
     overrides = {} if reannotate else load_script(script_path)
     use_llm = use_emotion and cfg.emotion_mode != "none"
 
-    # 段落ごとに、保存済みの行を使えるかどうかを決める
+    saved = {} if reannotate else _match_saved_rows(chapters, overrides)
+
+    # 段落ごとに、保存済みの行を使えるかどうかを決める。title / break は LLM にも文脈にも入れない
     plan: list[tuple[list, list | None, list | None, bool]] = []
     for chapter in chapters:
         paras = chapter.paragraphs
-        for p_i, segs in enumerate(paras):
-            prev = paras[p_i - 1] if p_i > 0 else None
-            nxt = paras[p_i + 1] if p_i + 1 < len(paras) else None
-            kept = all(
-                (r := overrides.get(s.key)) is not None and r["source"] == s.text for s in segs
-            )
+        body = [segs for segs in paras if segs[0].kind not in ("title", "break")]
+        body_pos = {id(b): i for i, b in enumerate(body)}
+        for segs in body:
+            b_i = body_pos[id(segs)]
+            prev = body[b_i - 1] if b_i > 0 else None
+            nxt = body[b_i + 1] if b_i + 1 < len(body) else None
+            kept = all(s.key in saved for s in segs)
             plan.append((segs, prev, nxt, kept))
-    total = len(plan)
+    total = sum(len(c.paragraphs) for c in chapters)  # 題・区切りの段落も進捗に数える
 
-    def saved_row(s) -> dict | None:
-        # 保存済みで本文が一致する行は、段落の他の文が変わっていても手修正を保つ
-        r = overrides.get(s.key)
-        return _row(s, r["labels"], r["text"], r["seed"]) if r is not None and r["source"] == s.text else None
-
-    def neutral_row(s) -> dict:
-        return saved_row(s) or _row(s, "neutral:1", s.text)
+    def row_for(s) -> dict:
+        if s.kind == "break":
+            return _row(s, "", "")
+        if (r := saved.get(s.key)) is not None:
+            return _row_from_saved(s, r)
+        return _row(s, "neutral:1", s.text)
 
     annotated: dict[int, list[dict]] = {}
     pending = [i for i, (_, _, _, kept) in enumerate(plan) if not kept]
@@ -204,8 +211,8 @@ def annotate_chapters(
         for i, para_anns in zip(pending, results):
             rows = []
             for s, sent_anns in zip(plan[i][0], para_anns):
-                if (kept_row := saved_row(s)) is not None:
-                    rows.append(kept_row)
+                if (r := saved.get(s.key)) is not None:
+                    rows.append(_row_from_saved(s, r))
                     continue
                 anns = []
                 for a in sent_anns:
@@ -220,19 +227,24 @@ def annotate_chapters(
     # LLM の段落は annotate_many の進捗で数え済み。残りの段落をここで加算する
     counted = len(annotated)
     rows: list[dict] = []
-    for i, (segs, _, _, kept) in enumerate(plan):
-        if kept:
-            rows.extend(
-                _row(s, overrides[s.key]["labels"], overrides[s.key]["text"], overrides[s.key]["seed"])
-                for s in segs
-            )
-        elif i in annotated:
-            rows.extend(annotated[i])
-        else:
-            rows.extend(neutral_row(s) for s in segs)
-        if progress and i not in annotated:
-            counted += 1
-            progress(counted, total, f"章 {segs[0].chapter_idx + 1} / 段落 {segs[0].para_idx + 1}")
+    plan_i = 0
+    for chapter in chapters:
+        for segs in chapter.paragraphs:
+            if segs[0].kind in ("title", "break"):
+                rows.extend(row_for(s) for s in segs)
+                if progress:
+                    counted += 1
+                    progress(counted, total, f"章 {segs[0].chapter_idx + 1} / 段落 {segs[0].para_idx + 1}")
+                continue
+            i = plan_i
+            plan_i += 1
+            if i in annotated:
+                rows.extend(annotated[i])
+            else:
+                rows.extend(row_for(s) for s in segs)
+                if progress:
+                    counted += 1
+                    progress(counted, total, f"章 {segs[0].chapter_idx + 1} / 段落 {segs[0].para_idx + 1}")
 
     # --chapters で一部の章だけ処理した場合に、処理対象外の章の行（手修正を含む）を消さない。
     # 処理した章では今回存在しない行（小説から削除した文）を残さない
@@ -242,6 +254,37 @@ def annotate_chapters(
     merged = sorted(rows + others, key=lambda r: (int(r["chapter"]), int(r["para"]), int(r["seg"])))
     write_script(script_path, merged)
     return rows
+
+
+def _match_saved_rows(chapters: list[Chapter], overrides: dict) -> dict[tuple[int, int, int], dict]:
+    """保存済みの行を文に対応づける。題・区切りの挿入で段落番号がずれても手直しを引き継ぐ。
+
+    パス 1 はキーと source が一致する行、パス 2 は残りの文を同じ章で source が一致する未使用の行に
+    文書順で割り当てる（先の文の fallback が後の文のキー一致を奪わないよう 2 パスにする）。
+    """
+    segs = [s for c in chapters for p in c.paragraphs for s in p if s.kind != "break"]
+    matched: dict[tuple[int, int, int], dict] = {}
+    used: set[tuple[int, int, int]] = set()
+    for s in segs:
+        r = overrides.get(s.key)
+        if r is not None and r["source"] == s.text:
+            matched[s.key] = r
+            used.add(s.key)
+    unused: dict[tuple[int, str], deque[tuple[int, int, int]]] = defaultdict(deque)
+    for k, r in sorted(overrides.items()):
+        if k not in used:
+            unused[(k[0], r["source"])].append(k)
+    for s in segs:
+        if s.key in matched:
+            continue
+        queue = unused.get((s.chapter_idx, s.text))
+        if queue:
+            matched[s.key] = overrides[queue.popleft()]
+    return matched
+
+
+def _row_from_saved(s, r: dict) -> dict:
+    return _row(s, r["labels"], r["text"], r.get("seed", ""))
 
 
 def _row(s, labels: str, text: str, seed: str = "") -> dict:
@@ -277,7 +320,7 @@ def synthesize_book(
         for idx in sorted(by_chapter)
         if chapters is None or idx + 1 in chapters
     ]
-    total = sum(len(rs) for _, rs in targets)
+    total = sum(1 for _, rs in targets for r in rs if r.get("kind") != "break")
     done = 0
     chapter_files: list[Path] = []
     try:
@@ -287,8 +330,12 @@ def synthesize_book(
                 if should_stop and should_stop():
                     _remove_old_full(out_dir)
                     return BookResult(chapter_files, None, stopped=True)
+                if r.get("kind") == "break":
+                    clips.append(Clip(None, int(r["chapter"]), int(r["para"]), int(r["seg"]), kind="break"))
+                    continue
                 path = synth.synthesize(spoken_text(r), force=force, seed=row_seed(r))
-                clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"])))
+                clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"]),
+                                  kind=r.get("kind", "narration"), text=spoken_text(r)))
                 done += 1
                 if progress:
                     progress(done, total, f"章 {idx + 1} / 文 {done}/{total}")
@@ -448,14 +495,23 @@ def _sig_path(chapter_wav: Path) -> Path:
     return chapter_wav.with_name(chapter_wav.name + ".sig")
 
 
+def _synth_identity(synth) -> list:
+    """読み辞書と LoRA は、どちらかがあるときだけ署名に入れる（既存の .sig を無効にしない）。"""
+    readings = getattr(synth, "readings_key", None)
+    lora = getattr(synth, "lora_key", None)
+    return [{"readings": readings, "lora": lora}] if readings or lora else []
+
+
 def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
     payload = [
         [spoken_text(r) for r in rows],
         [(int(r["para"]), int(r["seg"])) for r in rows],
+        [r.get("kind", "") for r in rows],
         asdict(cfg.sampling),
         asdict(cfg.silence),
         cfg.checkpoint,
         getattr(synth, "latent_key", None),
+        *_synth_identity(synth),
         TEXT_RULE,
     ]
     if any(row_seed(r) is not None for r in rows):  # 既存の署名を変えないよう、あるときだけ足す

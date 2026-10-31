@@ -76,6 +76,10 @@ class SilenceConfig:
     sentence: float = 0.25
     paragraph: float = 0.6
     chapter: float = 1.0
+    title: float = 1.0  # 章題の後
+    scene: float = 2.0  # 区切り行の位置
+    turn: float = 0.4  # 同じ段落で台詞と地の文が切り替わる所
+    ellipsis: float = 0.6  # 前の文が …‥―— で終わる所
 
 
 @dataclass
@@ -117,6 +121,8 @@ class Config:
     empty_cache_interval: int = 10
     voices_dir: str = "voices"
     voice: str | None = None
+    readings: list[str] = field(default_factory=list)
+    lora_adapter: str | None = None
     ref_normalize_db: float | None = -16.0
     max_ref_seconds: float | None = None
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -129,6 +135,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     split: SplitConfig = field(default_factory=SplitConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
+    read_chapter_title: bool = True
     bgm: BgmConfig = field(default_factory=BgmConfig)
     check: CheckConfig = field(default_factory=CheckConfig)
     output_dir: str = "out"
@@ -174,6 +181,9 @@ def _build(cls, data: dict[str, Any]):
         for key, sub in _SECTIONS.items():
             if key in kwargs:
                 kwargs[key] = _build(sub, kwargs[key] or {})
+        readings = kwargs.get("readings", [])
+        if not isinstance(readings, list) or not all(isinstance(r, str) for r in readings):
+            raise ValueError("Config: readings は読み辞書の YAML ファイルのパスのリストにしてください")
         if "emotion_emoji" in kwargs:
             _check_emotion_emoji(kwargs["emotion_emoji"])
     return cls(**kwargs)

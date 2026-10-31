@@ -86,8 +86,12 @@ def test_手直しした_seed_は_script_再実行で保たれる(book):
 
 def test_段落の一部が変わっても一致する行の_seed_は保たれる(book):
     cfg, out, _titles, rows = book
-    para_rows = [r for r in rows if (r["chapter"], r["para"]) == (rows[0]["chapter"], rows[0]["para"])]
-    assert len(para_rows) >= 2, "サンプルの最初の段落が 2 文以上ある前提"
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        if r["kind"] not in ("title", "break"):
+            groups.setdefault((r["chapter"], r["para"]), []).append(r)
+    para_rows = next((g for g in groups.values() if len(g) >= 2), None)
+    assert para_rows is not None, "サンプルに 2 文以上の段落がある前提"
     first = (int(para_rows[0]["chapter"]), int(para_rows[0]["para"]), int(para_rows[0]["seg"]))
     last = (int(para_rows[-1]["chapter"]), int(para_rows[-1]["para"]), int(para_rows[-1]["seg"]))
     _set_seed(out, first, "11")
