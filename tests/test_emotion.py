@@ -729,3 +729,48 @@ def test_unload_warns_on_http_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(requests, "post", lambda url, **kw: FakeResp(status=500))
     LLMAnnotator(LLMConfig(), tmp_path / "a.jsonl").unload()  # 例外は出ない
     assert "[emotion]" in capsys.readouterr().out
+
+
+def test_chat_json_uses_given_system_and_schema(monkeypatch):
+    from irodori_speaker.emotion import chat_json
+
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.update(json)
+        return FakeResp({"message": {"content": '{"ok": 1}'}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    assert chat_json(LLMConfig(), "SYS", "USER", {"type": "object"}, "x") == {"ok": 1}
+    assert seen["messages"][0] == {"role": "system", "content": "SYS"}
+    assert seen["messages"][1] == {"role": "user", "content": "USER"}
+    assert seen["format"] == {"type": "object"}
+
+
+def test_chat_json_openai_uses_schema_name(monkeypatch):
+    from irodori_speaker.emotion import chat_json
+
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.update(json)
+        return FakeResp({"choices": [{"message": {"content": '{"ok": 1}'}}]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    cfg = LLMConfig(api="openai", base_url="http://h:1/v1")
+    assert chat_json(cfg, "S", "U", {"type": "object"}, "scene") == {"ok": 1}
+    assert seen["response_format"]["json_schema"]["name"] == "scene"
+
+
+def test_unload_model_posts_keep_alive_zero(monkeypatch):
+    from irodori_speaker.emotion import unload_model
+
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["url"], seen["json"] = url, json
+        return FakeResp({})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    unload_model(LLMConfig(base_url="http://h:1"))
+    assert seen["url"] == "http://h:1/api/generate" and seen["json"]["keep_alive"] == 0

@@ -1422,6 +1422,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bgm = [
+    { name = "transformers" },
+]
 cu128 = [
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -1462,8 +1465,9 @@ requires-dist = [
     { name = "torchaudio", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'cu128'", specifier = ">=2.10.0,<2.11.0" },
     { name = "torchaudio", marker = "extra == 'tts'", specifier = ">=2.10.0,<2.11.0" },
     { name = "tqdm" },
+    { name = "transformers", marker = "extra == 'bgm'" },
 ]
-provides-extras = ["tts", "cu128", "webui", "dev"]
+provides-extras = ["tts", "cu128", "webui", "bgm", "dev"]
 
 [[package]]
 name = "irodori-tts"
