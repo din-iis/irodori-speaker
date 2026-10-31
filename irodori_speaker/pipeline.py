@@ -633,6 +633,15 @@ class ExportResult:
     skipped: bool  # 署名が一致して再エンコードしなかった
 
 
+def _remove_export_outputs(full: Path, chapter_dir: Path | None) -> None:
+    """通し・.sig・章ディレクトリ（export 専用）の *.mp3 をすべて消す。"""
+    stale = [full, _sig_path(full)]
+    if chapter_dir is not None and chapter_dir.is_dir():
+        stale += chapter_dir.glob("*.mp3")
+    for p in stale:
+        p.unlink(missing_ok=True)
+
+
 def build_export(
     cfg: Config,
     out_dir: Path,
@@ -662,11 +671,7 @@ def build_export(
         chapters = export.collect_chapters(inputs, rows, source=source)
     except BaseException:
         # 今の本と合わない古い書き出しを使えないよう、今回の source / fmt の出力だけ消す
-        stale = [full, _sig_path(full)]
-        if chapter_dir is not None and chapter_dir.is_dir():
-            stale += chapter_dir.glob("*.mp3")
-        for p in stale:
-            p.unlink(missing_ok=True)
+        _remove_export_outputs(full, chapter_dir)
         raise
 
     book = cfg.export.title or out_dir.name
@@ -723,8 +728,7 @@ def build_export(
                 if p not in chapter_paths:
                     p.unlink(missing_ok=True)
     except BaseException:
-        # 新旧の章が混ざらないよう、書き出し済みの章 MP3 もすべて消す
-        for p in [full, sig_file, *chapter_paths]:
-            p.unlink(missing_ok=True)
+        # 新旧の章が混ざらないよう、旧名のものも含めて章 MP3 をすべて消す
+        _remove_export_outputs(full, chapter_dir)
         raise
     return ExportResult(full, chapter_paths, False)

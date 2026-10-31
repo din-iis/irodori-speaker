@@ -602,3 +602,31 @@ def test_build_export_skip_leaves_chapter_dir_alone(tmp_path):
     extra.write_bytes(b"x")
     assert pipeline.build_export(cfg, out_dir, fmt="mp3").skipped
     assert extra.exists()
+
+
+# ---------- 追加修正 3 ----------
+
+
+@needs_ffmpeg
+def test_build_export_mp3_encode_failure_removes_old_named_chapters(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    first = pipeline.build_export(cfg, out_dir, fmt="mp3")
+    chapter_dir = first.chapter_files[0].parent
+    old_named = chapter_dir / "01_旧題.mp3"  # 章題を変える前に書き出された章 MP3
+    old_named.write_bytes(b"x")
+    real = audio_io.encode_file
+    calls = []
+
+    def flaky(src, dst, args):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise RuntimeError("ffmpeg が失敗しました")
+        real(src, dst, args)
+
+    monkeypatch.setattr(audio_io, "encode_file", flaky)
+    cfg2 = replace(cfg, export=replace(cfg.export, title="別の題名"))
+    with pytest.raises(RuntimeError):
+        pipeline.build_export(cfg2, out_dir, fmt="mp3")
+    assert not old_named.exists()
+    assert not list(chapter_dir.glob("*.mp3"))
+    assert not first.path.exists() and not pipeline._sig_path(first.path).exists()
