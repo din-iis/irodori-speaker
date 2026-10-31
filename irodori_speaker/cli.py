@@ -12,6 +12,7 @@ from .pipeline import (
     book_dir,
     build_bgm,
     build_script,
+    check_book,
     load_book,
     parse_chapter_range,
     synthesize_book,
@@ -201,6 +202,38 @@ def _run_bgm(args, cfg: Config, out_dir: Path) -> int:
     return 0
 
 
+ASR_MISSING = (
+    "ASR には transformers と torchaudio が必要です。"
+    "GPU マシンで `uv sync --frozen --extra tts --extra cu128` を実行してください（{err}）"
+)
+
+
+def _run_check(args, cfg: Config, out_dir: Path) -> int:
+    if args.checkpoint:
+        cfg = replace(cfg, checkpoint=args.checkpoint)
+    cfg = replace(cfg, voice=args.voice or cfg.voice)
+    with tqdm(total=1, desc="品質チェック", unit="文") as bar:
+        last = [0]
+
+        def progress(done: int, total: int, msg: str) -> None:
+            bar.total = total
+            bar.update(done - last[0])
+            last[0] = done
+
+        try:
+            result = check_book(
+                cfg, out_dir, chapters=parse_chapter_range(args.chapters), asr=args.asr, progress=progress
+            )
+        except ImportError as e:
+            print(ASR_MISSING.format(err=e))
+            return 2
+        except (RuntimeError, ValueError) as e:
+            print(e)
+            return 1
+    print(f"{result.total} 文中 {result.flagged} 件に印（{result.path}）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="irodori_speaker", description="小説を Irodori-TTS で読み上げる")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -216,10 +249,13 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--llm-model", help="LLM のモデル名（config を上書き）")
         p.add_argument("--think", action="store_true", help="LLM の思考モードを有効にする")
 
-    def synth_opts(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--force", action="store_true", help="合成済みのセグメントも作り直す")
+    def voice_opts(p: argparse.ArgumentParser) -> None:
         p.add_argument("--voice", help="声の名前（config の voice を上書き）。none なら参照音声を使わない")
         p.add_argument("--checkpoint", help="TTS のチェックポイント（config を上書き）")
+
+    def synth_opts(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--force", action="store_true", help="合成済みのセグメントも作り直す")
+        voice_opts(p)
 
     for name, helptext, opts in (
         ("script", "台本 script.tsv を作る", [script_opts]),
@@ -237,10 +273,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--llm-model", help="LLM のモデル名（config を上書き）")
     p.add_argument("--think", action="store_true", help="LLM の思考モードを有効にする")
 
+    p = sub.add_parser("check", help="synth 済みの文を調べて、怪しい文に印を付けた check.tsv を作る")
+    common(p)
+    voice_opts(p)
+    p.add_argument("--asr", action="store_true", help="音声認識で文字誤り率も調べる（transformers が要る）")
+
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
     out_dir = book_dir(cfg, args.novel)
 
+    if args.command == "check":
+        return _run_check(args, cfg, out_dir)
     if args.command == "bgm":
         return _run_bgm(args, cfg, out_dir)
     if args.command in ("script", "run"):

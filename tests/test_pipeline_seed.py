@@ -123,3 +123,208 @@ def test_署名は_seed_があるときだけ変わる(book):
     assert pipeline.chapter_signature(seeded, cfg, synth) != base
     other = [dict(ch[0], seed="4"), *ch[1:]]
     assert pipeline.chapter_signature(other, cfg, synth) != pipeline.chapter_signature(seeded, cfg, synth)
+
+
+# ---------- check_book ----------
+
+import json  # noqa: E402
+
+from irodori_speaker import check, cli  # noqa: E402
+from irodori_speaker.synth import Synthesizer  # noqa: E402
+
+SR = 16000
+
+
+def _wav(path: Path, seconds: float) -> None:
+    t = np.arange(int(SR * seconds)) / SR
+    sf.write(path, (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), SR)
+
+
+def _check_cfg(tmp_path: Path) -> Config:
+    return Config(output_dir=str(tmp_path / "out"), voice="none", device="cpu")
+
+
+def _make_check_book(tmp_path, specs, cfg=None):
+    """specs: (chapter, para, seg, kind, text, seconds|None, seed)。seconds が None なら WAV を作らない。"""
+    cfg = cfg or _check_cfg(tmp_path)
+    out = Path(cfg.output_dir) / "novel"
+    out.mkdir(parents=True)
+    chapters = sorted({s[0] for s in specs})
+    (out / "chapters.json").write_text(
+        json.dumps({"chapters": [{"idx": c, "title": f"t{c}"} for c in chapters]}), encoding="utf-8"
+    )
+    rows = [
+        {"chapter": c, "para": p, "seg": s, "kind": kind, "labels": "", "text": text, "source": text, "seed": seed}
+        for c, p, s, kind, text, _sec, seed in specs
+    ]
+    pipeline.write_script(out / "script.tsv", rows)
+    synth = Synthesizer(cfg, out / "segments", [], Path(cfg.output_dir) / ".voices")
+    keys = []
+    for row, spec in zip(rows, specs):
+        key = check.segment_key(synth, row)
+        keys.append(key)
+        if spec[5] is not None and spec[3] != "break":
+            _wav(out / "segments" / f"{key}.wav", spec[5])
+    return cfg, out, keys
+
+
+TEXT = "あいうえおかきくけこ"  # 10 文字
+
+
+def _text(i: int) -> str:
+    """同じ長さで中身の違う文（同じ本文だと同じ鍵になって WAV を共有してしまう）。"""
+    return "あいうえおかきくけ" + "こさしすせそたちつてと"[i]
+
+
+def _normal_specs(n=8, long_at=None, missing_at=None):
+    specs = []
+    for i in range(n):
+        sec = 1.0 + 0.01 * i
+        if i == long_at:
+            sec = 6.0
+        specs.append((0, 0, i, "narration", _text(i), None if i == missing_at else sec, ""))
+    return specs
+
+
+def test_check_book_は全行を調べて_check_tsv_を書く(tmp_path):
+    cfg, out, keys = _make_check_book(tmp_path, _normal_specs(long_at=3, missing_at=5))
+    res = pipeline.check_book(cfg, out)
+    assert res.path == out / "check.tsv" and res.path.exists()
+    assert res.total == 8
+    by_seg = {r.seg: r for r in res.rows}
+    assert "long" in by_seg[3].flags
+    assert by_seg[5].flags == ["missing"] and by_seg[5].stats is None
+    assert by_seg[0].flags == []
+    assert res.flagged == 2
+    assert by_seg[0].key == keys[0]
+
+
+def test_check_book_は_warnings_log_のキーに_warned_を付ける(tmp_path):
+    cfg, out, keys = _make_check_book(tmp_path, _normal_specs())
+    (out / "warnings.log").write_text(f"{keys[2]}\t{_text(2)}\tmax_seconds で切り詰め\n", encoding="utf-8")
+    res = pipeline.check_book(cfg, out)
+    assert [r.seg for r in res.rows if "warned" in r.flags] == [2]
+
+
+def test_check_book_は区切り行を飛ばす(tmp_path):
+    specs = [(0, 0, 0, "break", "", None, ""), *_normal_specs(3)[0:0]]
+    specs += [(0, 1, i, "narration", TEXT, 1.0, "") for i in range(3)]
+    cfg, out, _ = _make_check_book(tmp_path, specs)
+    res = pipeline.check_book(cfg, out)
+    assert res.total == 3 and all(r.para == 1 for r in res.rows)
+
+
+def test_check_book_は行の_seed_を鍵に使う(tmp_path):
+    specs = [(0, 0, 0, "narration", TEXT, 1.0, "9"), (0, 0, 1, "narration", TEXT, 1.0, "")]
+    cfg, out, keys = _make_check_book(tmp_path, specs)
+    res = pipeline.check_book(cfg, out)
+    assert res.rows[0].key == keys[0] != res.rows[1].key
+    assert all(r.stats is not None for r in res.rows)
+
+
+def test_check_book_は章で絞る(tmp_path):
+    specs = [(0, 0, 0, "narration", TEXT, 1.0, ""), (1, 0, 0, "narration", TEXT, 1.0, "")]
+    cfg, out, _ = _make_check_book(tmp_path, specs)
+    res = pipeline.check_book(cfg, out, chapters={2})
+    assert [r.chapter for r in res.rows] == [1]
+
+
+def test_check_book_は章_WAV_の_times_から_offset_を出す(tmp_path):
+    cfg, out, _ = _make_check_book(tmp_path, [(0, 0, 0, "narration", TEXT, 1.0, "")])
+    wav = pipeline._chapter_path(out, 0, {0: "t0"})
+    wav.parent.mkdir(parents=True)
+    (wav.with_suffix(".times.json")).write_text(
+        json.dumps({"sr": 100, "frames": 1000, "paragraphs": [[0, 250, 900]]}), encoding="utf-8"
+    )
+    res = pipeline.check_book(cfg, out)
+    assert res.rows[0].offset == pytest.approx(2.5)
+
+
+def test_check_book_は_asr_で_cer_と_transcript_を付ける(tmp_path):
+    cfg, out, _ = _make_check_book(tmp_path, _normal_specs(3))
+    seen = []
+
+    def fake(paths):
+        seen.append(len(paths))
+        return [_text(0), "まったくちがうぶんしょう", _text(2)]
+
+    res = pipeline.check_book(cfg, out, asr=True, transcriber=fake)
+    assert seen == [3]
+    assert [r.transcript for r in res.rows][0] == _text(0)
+    assert res.rows[0].cer == 0.0 and res.rows[1].cer > 0.3
+    assert "cer" in res.rows[1].flags
+    header = res.path.read_text(encoding="utf-8").splitlines()[0].split("\t")
+    assert header[-2:] == ["cer", "transcript"]
+
+
+def test_check_book_は_asr_に存在する_WAV_だけ渡す(tmp_path):
+    cfg, out, _ = _make_check_book(tmp_path, _normal_specs(3, missing_at=1))
+    got = []
+    res = pipeline.check_book(cfg, out, asr=True, transcriber=lambda paths: got.append(paths) or [_text(0), _text(2)])
+    assert len(got[0]) == 2
+    assert res.rows[1].cer is None and res.rows[1].flags == ["missing"]
+
+
+def test_check_book_は_voice_が無ければ_ValueError(tmp_path):
+    cfg, out, _ = _make_check_book(tmp_path, _normal_specs(2))
+    with pytest.raises(ValueError, match="voice"):
+        pipeline.check_book(replace(cfg, voice=None), out)
+
+
+def test_check_book_は台本が無ければ_ValueError(tmp_path):
+    with pytest.raises(ValueError):
+        pipeline.check_book(_check_cfg(tmp_path), tmp_path / "none")
+
+
+# ---------- cli check ----------
+
+
+def _cli_novel(tmp_path):
+    novel = tmp_path / "novel.txt"
+    novel.write_text("x", encoding="utf-8")
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(f"output_dir: {tmp_path / 'out'}\ndevice: cpu\n", encoding="utf-8")
+    return novel, cfg_path
+
+
+def test_cli_check_は_script_が無ければ_1(tmp_path, capsys):
+    novel, cfg_path = _cli_novel(tmp_path)
+    assert cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none"]) == 1
+    assert "script" in capsys.readouterr().out
+
+
+def test_cli_check_は要約を表示して印があっても_0(tmp_path, capsys):
+    novel, cfg_path = _cli_novel(tmp_path)
+    _make_check_book(tmp_path, _normal_specs(8, long_at=3), cfg=_check_cfg(tmp_path))
+    assert cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none"]) == 0
+    assert "8 文中 1 件に印" in capsys.readouterr().out
+
+
+def test_cli_check_は声が無ければ_1(tmp_path, capsys):
+    novel, cfg_path = _cli_novel(tmp_path)
+    _make_check_book(tmp_path, _normal_specs(2), cfg=_check_cfg(tmp_path))
+    assert cli.main(["check", str(novel), "-c", str(cfg_path)]) == 1
+    assert "voice" in capsys.readouterr().out
+
+
+def test_cli_check_の_checkpoint_は鍵に反映される(tmp_path, capsys):
+    novel, cfg_path = _cli_novel(tmp_path)
+    cfg = replace(_check_cfg(tmp_path), checkpoint="my/ckpt")
+    _make_check_book(tmp_path, _normal_specs(4), cfg=cfg)
+    args = ["check", str(novel), "-c", str(cfg_path), "--voice", "none"]
+    cli.main(args)
+    assert "4 文中 4 件に印" in capsys.readouterr().out  # 既定の checkpoint では鍵が合わず全部 missing
+    cli.main([*args, "--checkpoint", "my/ckpt"])
+    assert "4 文中 0 件に印" in capsys.readouterr().out
+
+
+def test_cli_check_は_asr_で_transformers_が無ければ_2(tmp_path, monkeypatch, capsys):
+    novel, cfg_path = _cli_novel(tmp_path)
+    _make_check_book(tmp_path, _normal_specs(2), cfg=_check_cfg(tmp_path))
+
+    def boom(_cfg):
+        raise ImportError("No module named 'transformers'")
+
+    monkeypatch.setattr(check, "transcribe_with", boom)
+    assert cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none", "--asr"]) == 2
+    assert "transformers" in capsys.readouterr().out
