@@ -524,3 +524,10 @@ def test_read_exclude_ignores_comments_and_blank(tmp_path):
     path.write_text("# header\n\n123  # 違う音\n  456\n", encoding="utf-8")
     assert read_exclude(path) == {123, 456}
     assert read_exclude(tmp_path / "none.txt") == set()
+
+
+def test_gate_schema_forbids_additional_properties():
+    from irodori_speaker.bgm_select import GATE_SCHEMA
+
+    assert GATE_SCHEMA["additionalProperties"] is False
+    assert GATE_SCHEMA["properties"]["results"]["items"]["additionalProperties"] is False

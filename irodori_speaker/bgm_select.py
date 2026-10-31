@@ -57,8 +57,10 @@ GATE_SCHEMA = {
         "type": "object",
         "properties": {"id": {"type": "integer"}, "accept": {"type": "boolean"}, "reason": {"type": "string"}},
         "required": ["id", "accept", "reason"],
+        "additionalProperties": False,
     }}},
     "required": ["results"],
+    "additionalProperties": False,
 }
 
 _DESC_CHARS = 300
