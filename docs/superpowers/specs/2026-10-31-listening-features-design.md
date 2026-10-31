@@ -1,5 +1,7 @@
 # irodori-speaker: 聴くための 5 機能（書き出し・品質チェック・場面区切り・読み辞書・LoRA）
 
+> **実装後の差分（2026-10-31）**: 自動の題は `AUTO_TITLES` の文字列ではなく `text_splitter._split_chapters_marked` の旗で判定する（実際の見出し「序」も読むため）。章署名には `kind` の並びも入る。`is_separator` は U+1F000 以上か U+FE0F を含む行（パレット外の絵文字）を区切りにしない。`check` には `silent` の印が加わり、キー計算は `check.segment_key(synth, row)` = `synth.segment_key(text, seed=...)`。`export` は入力の stat も署名に入れ、失敗時・書き出し中の入力更新時は章 MP3 も含めて出力を消す。詳細は CLAUDE.md。
+
 ## Context
 
 irodori-speaker は小説を Irodori-TTS で読み上げ、`bgm` で環境音と音楽を重ねるツール。2026-10-31 の提案で、「読んでいない小説を iPhone で聴く人が、通しで聴き直さずに悪い文を見つけて直せること」「スマホで聴ける形になっていること」を物差しに 6 件を挙げ、ユーザーが 1〜5 の実装を決めた（6 の登場人物ごとの声は見送り）。
