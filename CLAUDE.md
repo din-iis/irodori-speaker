@@ -30,15 +30,16 @@ uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml     #
 uv run --no-sync python -m irodori_speaker synth  novel.txt -c config.yaml     # ステップ 2（TTS だけ）
 uv run --no-sync python -m irodori_speaker run    novel.txt -c config.yaml     # 一括
 uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
+uv run --no-sync python -m irodori_speaker bgm    novel.txt -c config.yaml     # ステップ 3（synth 済みに環境音と音楽を重ねる。Ollama・Freesound のキー・CLAP が要る）
 # キャプション（上流の SamplingRequest.caption）で感情を指示できるかの実験。本体の合成はまだキャプションを使わない
 uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> --checkpoint <B>
 ```
 
-サブコマンドは `script` / `synth` / `run`。`script` は `--chapters --no-emotion --reannotate --llm-model --think`、`synth` は `--chapters --force --voice --checkpoint`、`run` はその両方を取る。lint / formatter の設定は無い。`uv.lock` の `irodori-tts` を更新するときは `uv lock --upgrade-package irodori-tts`。
+サブコマンドは `script` / `synth` / `run` / `bgm`。`script` は `--chapters --no-emotion --reannotate --llm-model --think`、`synth` は `--chapters --force --voice --checkpoint`、`run` はその両方を取る。`bgm` は `--chapters --replan --llm-model --think`（`run` には入れない）。lint / formatter の設定は無い。`uv.lock` の `irodori-tts` を更新するときは `uv lock --upgrade-package irodori-tts`。
 
 ## Architecture
 
-2 つのステップに分かれ、`cli.py` と `webui.py` は `pipeline.py` の同じ関数（`build_script` / `synthesize_book`）を呼ぶ別入口。ステップ 2 は `script.tsv` と `chapters.json` だけを読み、LLM に触れない。
+2 つのステップ（と、その後に独立して走る `bgm`）に分かれ、`cli.py` と `webui.py` は `pipeline.py` の同じ関数（`build_script` / `synthesize_book`）を呼ぶ別入口。ステップ 2 は `script.tsv` と `chapters.json` だけを読み、LLM に触れない。
 
 1. `text_splitter.py`: 青空文庫のルビ・注記を読みに置換 → 章（正規表現）→ 段落（改行）→ 文（。！？、括弧の内側では切らない、1 文は `split.max_chars`=40 まで。長い文は後半で参照音声の声から離れるため短くしている）。`Segment(chapter_idx, para_idx, seg_idx, kind, text)` が全工程のキー。
 2. `emotion.py`: `split_clauses` が文を句（`、。！？!?…‥，,`）に分け、**段落単位**で LLM を呼んで句ごとに感情 10 種 × 強度 1〜3 を得る。出力は `validate()` で検証し、不正値・欠落は neutral にフォールバック。成功結果だけ `annotations.jsonl` にキャッシュする（キーはモデル・段落・前後の文脈・`think`）。`apply_shift` で地の文の強度を下げ、`build_spoken_text` が `emotion_emoji` の表から絵文字を句の先頭（括弧で始まる句は括弧の直後）に置く。同じ文の中で直前の句と同じ絵文字は置かない。`LLMAnnotator` は `llm.api` で 2 系統（`ollama` / `openai`）、`LLMServer` が `server_command` のプロセスを起動・停止する。
@@ -68,6 +69,17 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> 
 - 「停止」は `should_stop` のフラグを立てるだけで、現在の文が終わり次第止まる。文ごとのキャッシュがあるので、再実行で続きから進む。
 - 「声を追加」は `voices/<ID><元の拡張子>` にコピーする。既存の ID は上書きせず拒否する。
 - 絵文字パレット（`irodori_tts.gradio_emoji_palette`）は import できるときだけ使い、できなければ感情プリセットの Dropdown と「絵文字を文頭に挿入」ボタンにする。「総当たり生成」は同じ seed で文頭の絵文字だけを変えて 10 感情を生成する。
+
+### bgm ステップ
+
+`bgm` は `synth` の後に走る独立した工程で、`script.tsv` / `chapters.json` / 章 WAV と `.times.json` だけを読み、朗読の WAV を書き換えない。入口は `cli._run_bgm` → `pipeline.build_bgm`（`BgmDeps` で LLM・Freesound・CLAP・サーバー・ダウンロードを差し替える。`bgm_*` / `emotion` は関数の中で遅延 import し、`pipeline.py` のトップレベルに置かない）。設計は `docs/superpowers/specs/2026-10-31-bgm-design.md`。
+
+1. `build_bgm` の順序: `load_book` → 対象の章すべてで `bgm_mix.load_times`（無ければ `synth --chapters N` を案内して `ValueError`、LLM を起動する前）→ `freesound.load_key`（LLM の前。`KeyMissing`）→ `with LLMServer`: `bgm_scenes`（`ScenePlanner.plan_chapter` → `merge_short` → `scenes.json`）、`bgm_select.search_slots` → `Gate` / `gate_slots` → `gate.tsv`、`unload` → **LLM を解放してから** `ClapScorer` を作り `choose` → `selection.json` / `missing.tsv` → 章ごとに `build_layout` → `render` → `write_mp3` → `CREDITS.txt` → 通し。
+2. 8GB の GPU に LLM と CLAP を同時に載せない。`ClapScorer` は LLM の `unload` の後に作り、選び終えたら捨てる。torch / transformers は `ClapScorer` の中でだけ import する。
+3. キャッシュ（`bgm/cache/`）: `scenes.jsonl`（場面）・`search.json`（検索語と条件ごと。上限で止まった後の再実行で API を呼ばない）・`gate.jsonl`（ふるい分け）・`scores.json`（CLAP の点）。`--replan` は `scenes.jsonl` だけ消す。章の MP3 は `<mp3>.sig`（朗読の署名・場面・選んだ音の ID・`bgm` 設定の `mix_signature`）が一致すれば重ね直さず、重ね直すときは選んだ音だけ `bgm/tmp/` にダウンロードして、重ね終えたら（例外でも）消す。通しは `--chapters` なしで全章の MP3 が揃ったときだけ作り、それ以外と失敗時は古い通しを消す。`--chapters` で一部だけ処理しても `selection.json` / `scenes.json` の他の章は残す。
+4. 1 日の上限（`DailyLimit`）は捕まえずに上げ、MP3 は書かない（`cli` は終了コード 1）。`KeyMissing` / `ImportError` は終了コード 2、`ValueError` / `RuntimeError` は 1。
+5. キーは `~/.config/irodori-speaker/secrets.env`（`bgm.secrets_file`）の `FREESOUND_API_KEY=` 行だけに置く。環境変数に置かない。`Authorization` ヘッダーで API ホストにだけ送り、URL・例外・ログ・キャッシュに含めない（試聴 MP3 の取得には付けない）。**実装・テストはこの実ファイルを読まない**（テストは `tmp_path` に偽のファイルを作る）。
+6. `exclude.txt`（手で書く Freesound の ID、`bgm` は読むだけ）以外の `scenes.json` / `selection.json` は派生ファイルで、手で直さない。出力は私的な利用に限る（小説の著作権と Freesound のライセンス）。
 
 ## 注意点
 

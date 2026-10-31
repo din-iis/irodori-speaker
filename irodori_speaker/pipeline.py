@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 from collections import defaultdict
+from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,26 @@ class BookResult:
     full_path: Path | None
     stopped: bool
     stale_chapters: list[int] = field(default_factory=list)  # 1 始まり。台本と一致しない章 WAV
+
+
+@dataclass
+class BgmResult:
+    chapter_files: list[Path]
+    full_path: Path | None
+    missing: int  # missing.tsv の行数（見つからなかった音の枠と LLM が失敗した場面）
+
+
+@dataclass
+class BgmDeps:
+    """build_bgm が外に頼る部品。None なら本物を作る（テストで偽物に差し替える）。"""
+
+    client_factory: Callable[[str], object] | None = None  # (API キー) -> Freesound のクライアント
+    planner_factory: Callable[[object, Path], object] | None = None  # (llm 設定, キャッシュ) -> ScenePlanner
+    gate_factory: Callable[[object, Path], object] | None = None  # (llm 設定, キャッシュ) -> Gate
+    scorer_factory: Callable[[object], object] | None = None  # (bgm 設定) -> ClapScorer
+    server_factory: Callable[[object], AbstractContextManager] | None = None  # (llm 設定) -> LLMServer
+    unload: Callable[[object], None] | None = None  # (llm 設定)
+    download: Callable[[str, Path], None] | None = None  # (URL, 保存先)
 
 
 def parse_chapter_range(spec: str | None) -> set[int] | None:
@@ -329,3 +350,181 @@ def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
 
 def _chapter_path(out_dir: Path, idx: int, titles: dict[int, str]) -> Path:
     return out_dir / "chapters" / f"{idx + 1:02d}_{safe_name(titles.get(idx, ''))}.wav"
+
+
+def build_bgm(
+    cfg: Config,
+    out_dir: Path,
+    *,
+    chapters: set[int] | None = None,
+    replan: bool = False,
+    llm_overrides: dict | None = None,
+    deps: BgmDeps | None = None,
+    progress: Progress | None = None,
+) -> BgmResult:
+    """合成済みの章 WAV に環境音と音楽を重ねて、章ごとと通しの MP3 を作る。"""
+    # bgm_* と emotion は、Mac のテストと script が壊れないよう呼ばれたときに import する
+    from . import audio_io, bgm_mix, bgm_scenes, bgm_select, freesound
+
+    deps = deps or BgmDeps()
+    if llm_overrides:
+        cfg = replace(cfg, llm=replace(cfg.llm, **llm_overrides))
+    bgm = cfg.bgm
+    bgm_dir = out_dir / "bgm"
+    cache_dir = bgm_dir / "cache"
+    tmp_dir = bgm_dir / "tmp"
+    full_path = bgm_dir / f"{out_dir.name}_bgm_full.mp3"
+
+    titles, rows = load_book(out_dir)
+    all_chapters = {int(r["chapter"]) for r in rows}
+    targets = sorted(i for i in all_chapters if chapters is None or i + 1 in chapters)
+    if not targets:
+        raise ValueError("対象の章がありません")
+
+    # 1. 段落の時刻。無ければ LLM を動かす前に止める
+    times: dict[int, tuple[int, int, dict[int, tuple[int, int]]]] = {}
+    for idx in targets:
+        wav = _chapter_path(out_dir, idx, titles)
+        try:
+            if not wav.exists():
+                raise bgm_mix.TimesMismatch(f"{wav.name} がありません")
+            times[idx] = bgm_mix.load_times(wav)
+        except bgm_mix.TimesMismatch:
+            raise ValueError(
+                f"章 {idx + 1} の段落の時刻がありません。synth --chapters {idx + 1} を実行してください"
+                "（文のキャッシュがあるので音声合成はやり直しません）"
+            ) from None
+
+    # 2. キー（LLM を起動する前に確かめる）
+    key = freesound.load_key(bgm.secrets_file)
+
+    try:
+        # 3. 場面・検索・ふるい分け（LLM）
+        if replan:
+            (cache_dir / "scenes.jsonl").unlink(missing_ok=True)
+        client = (deps.client_factory or freesound.FreesoundClient)(key)
+        if deps.server_factory is None or deps.unload is None:
+            from .emotion import LLMServer, unload_model
+        server_factory = deps.server_factory or LLMServer
+        unload = deps.unload or unload_model
+        planner_factory = deps.planner_factory or (
+            lambda llm, path: bgm_scenes.ScenePlanner(llm, path)
+        )
+        gate_factory = deps.gate_factory or (lambda llm, path: bgm_select.Gate(llm, path))
+
+        paragraphs = bgm_scenes.chapter_paragraphs(rows)
+        scenes: dict[int, list] = {}
+        with server_factory(cfg.llm):
+            try:
+                planner = planner_factory(cfg.llm, cache_dir / "scenes.jsonl")
+                for n, idx in enumerate(targets):
+                    if progress:
+                        progress(n, len(targets), f"章 {idx + 1} の場面を区切り中 …")
+                    paras = paragraphs.get(idx, [])
+                    planned = planner.plan_chapter(idx, paras, bgm.scene_chunk_chars)
+                    scenes[idx] = bgm_scenes.merge_short(
+                        planned, {p: len(t) for p, t in paras}, bgm.min_scene_chars
+                    )
+                bgm_scenes.save_scenes(bgm_dir / "scenes.json", scenes, all_chapters)
+
+                slots = bgm_select.build_slots(scenes, bgm)
+                if progress:
+                    progress(0, len(slots), "Freesound を検索中 …")
+                found, failures = bgm_select.search_slots(
+                    slots, client, cache_dir / "search.json", bgm.candidates
+                )
+                if progress:
+                    progress(0, len(slots), "候補をふるい分け中 …")
+                gate = gate_factory(cfg.llm, cache_dir / "gate.jsonl")
+                survivors, gate_rows, llm_error = bgm_select.gate_slots(
+                    slots, found, gate, cfg.llm.concurrency
+                )
+                bgm_select.write_gate_tsv(bgm_dir / "gate.tsv", gate_rows)
+            finally:
+                unload(cfg.llm)
+
+        # 4. CLAP で順位を付けて選ぶ（LLM を解放した後）
+        if progress:
+            progress(0, len(slots), "CLAP で音を選んでいます …")
+        scorer = (deps.scorer_factory or (lambda b: bgm_select.ClapScorer(b.clap_model, b.device)))(bgm)
+        try:
+            choices = bgm_select.choose(
+                slots, found, survivors, {**failures, **llm_error}, scorer,
+                cache_dir / "scores.json", bgm_select.read_exclude(bgm_dir / "exclude.txt"),
+                tmp_dir, bgm.download_workers,
+                **({"download": deps.download} if deps.download else {}),
+            )
+        finally:
+            del scorer
+        bgm_select.write_selection(bgm_dir / "selection.json", choices, set(targets), all_chapters)
+        bgm_select.write_missing(bgm_dir / "missing.tsv", choices, scenes)
+
+        # 5. 章ごとの重ね合わせ
+        download = deps.download or freesound.download_preview
+        chapter_files: list[Path] = []
+        for n, idx in enumerate(targets):
+            if progress:
+                progress(n, len(targets), f"章 {idx + 1} に音を重ねています …")
+            wav = _chapter_path(out_dir, idx, titles)
+            mp3 = bgm_dir / "chapters" / f"{wav.stem}.mp3"
+            sr, frames, paras_t = times[idx]
+            chapter_choices = {
+                f"{c.chapter}:{c.scene}:{c.kind}": c for c in choices if c.chapter == idx
+            }
+            sig_file = _sig_path(mp3)
+            sig_src = _sig_path(wav)
+            narration_sig = (
+                sig_src.read_text(encoding="utf-8").strip() if sig_src.exists() else f"nosig:{frames}"
+            )
+            signature = bgm_mix.mix_signature(narration_sig, scenes[idx], chapter_choices, bgm)
+            chapter_files.append(mp3)
+            if (
+                mp3.exists()
+                and sig_file.exists()
+                and sig_file.read_text(encoding="utf-8").strip() == signature
+            ):
+                continue
+            sig_file.unlink(missing_ok=True)  # 書き込みに失敗したら stale 扱いにする
+            layout = bgm_mix.build_layout(sr, frames, paras_t, scenes[idx], chapter_choices, bgm)
+            downloaded: list[Path] = []
+            try:
+                sounds = {}
+                for track in [*layout.ambient, *layout.music]:
+                    sound = chapter_choices[track.key].sound
+                    dst = tmp_dir / f"{sound.id}.mp3"
+                    if dst not in downloaded:
+                        downloaded.append(dst)
+                        try:
+                            download(sound.preview, dst)
+                        except (freesound.FreesoundError, OSError) as e:
+                            raise RuntimeError(
+                                f"章 {idx + 1} で使う音をダウンロードできませんでした（ID {sound.id}）: {e}"
+                            ) from None
+                    sounds[track.key] = audio_io.decode(dst, sr, 2)
+                import soundfile as sf
+
+                narration, _ = sf.read(wav, dtype="float32")
+                if narration.ndim > 1:
+                    narration = narration[:, 0]
+                audio = bgm_mix.render(layout, narration, sounds, sr, bgm)
+                audio_io.write_mp3(audio, sr, mp3, bgm.mp3_bitrate)
+            finally:
+                for p in downloaded:
+                    p.unlink(missing_ok=True)
+            sig_file.write_text(signature, encoding="utf-8")
+
+        # 6. クレジットと通し
+        bgm_mix.write_credits(bgm_dir / "CREDITS.txt", bgm_select.load_selection(bgm_dir / "selection.json"))
+        if chapters is None and chapter_files and all(p.exists() for p in chapter_files):
+            audio_io.concat_mp3(chapter_files, full_path)
+            full: Path | None = full_path
+        else:
+            full_path.unlink(missing_ok=True)
+            full = None
+    except BaseException:
+        full_path.unlink(missing_ok=True)  # 途中で止まったときに古い通しを残さない
+        raise
+
+    missing_tsv = bgm_dir / "missing.tsv"
+    missing = max(0, len(missing_tsv.read_text(encoding="utf-8").splitlines()) - 1) if missing_tsv.exists() else 0
+    return BgmResult(chapter_files, full, missing)

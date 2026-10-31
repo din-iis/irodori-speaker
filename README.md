@@ -189,6 +189,71 @@ out/
 uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml --reannotate
 ```
 
+## BGM を付ける
+
+`synth` で作った朗読に、Freesound から自動で選んだ環境音と音楽を重ねて、章ごとと通しの MP3 を作ります（`bgm` サブコマンド）。朗読の WAV は読むだけで、書き換えません。`run` には含まれず、WebUI にもありません。
+
+流れは、LLM で章を場面に区切る → Freesound を検索する → LLM で候補をふるい分ける → LLM を解放する → CLAP で順位を付けて選ぶ → 重ね合わせ、です。合う音が見つからない場面は、ずれた音を流さず無音にして `missing.tsv` に残します。
+
+### 前提
+
+- `synth` を済ませ、章の WAV と `.times.json` があること。`.times.json` が無い章があれば、`synth --chapters N` を案内して止まります（文のキャッシュがあるので音声合成はやり直しません）。
+- GPU マシンで `uv sync --frozen --extra tts --extra cu128 --extra bgm` を実行する。Ollama が動いていること（`script` と同じ）。FFmpeg が必要。
+- Freesound の API キーを、**自分の端末で**ファイルに書く。キーを環境変数やシェルの設定ファイルに置かないのは、AI のエージェントが読めてしまうため。`bgm` はこのファイルだけを読み、キーを画面・ログ・キャッシュに書かない。ファイルが無いかキーの行が無ければ、手順を表示して終了コード 2 で止まる。
+
+```bash
+mkdir -p ~/.config/irodori-speaker
+read -rsp 'Freesound API key: ' k; echo
+printf 'FREESOUND_API_KEY=%s\n' "$k" > ~/.config/irodori-speaker/secrets.env; unset k
+chmod 600 ~/.config/irodori-speaker/secrets.env
+```
+
+ファイルの場所は設定 `bgm.secrets_file` で変えられます。
+
+### コマンド
+
+```bash
+uv run --no-sync python -m irodori_speaker bgm novel.txt -c config.yaml
+uv run --no-sync python -m irodori_speaker bgm novel.txt -c config.yaml --chapters 1-3
+```
+
+| オプション | 内容 |
+|---|---|
+| `--chapters` | 対象の章（1 始まり）。一部の章だけのときは、通しの MP3 を作らない |
+| `--replan` | 場面の区切りをやり直す。場面の説明が変わるので、ふるい分けと採点もやり直しになる |
+| `--llm-model` / `--think` | `script` と同じ（config の `llm` を上書き） |
+
+各段の結果は本ごとのキャッシュに残るので、途中で止めても再実行で続きから進みます。重ね合わせは、朗読・選んだ音・`bgm` 設定が同じ章を飛ばします。音量や長さは `config.yaml` の `bgm` 節で調整します。
+
+### 出力
+
+```
+out/<book>/bgm/
+  scenes.json                  章ごとの場面（段落の範囲、説明、検索語、雰囲気）
+  selection.json               場面ごとに選んだ音の ID・名前・作者・URL・ライセンス・点
+  gate.tsv                     ふるい分けの採否と理由（外し方の確認用）
+  missing.tsv                  見つからなかった音（理由: no_result / all_rejected / llm_error / error）
+  CREDITS.txt                  使った音の題名・作者・URL・ライセンス
+  exclude.txt                  手で書く除外リスト（下記）
+  chapters/NN_タイトル.mp3     章ごとの BGM 付き MP3（.sig は重ね直しの判定用）
+  <book>_bgm_full.mp3          通しの MP3（全章が揃うときだけ）
+  cache/                       検索・ふるい分け・採点・場面のキャッシュ
+```
+
+`bgm/tmp/` にダウンロードした音を一時的に置き、重ね終えたら消します。選んだ音の ID とメタデータだけを残し、重ね直すときは選んだ音だけをダウンロードし直します。
+
+### 違う音を替える（exclude.txt）
+
+聴いて「この音は違う」と思ったら、`CREDITS.txt` にある Freesound の ID を `out/<book>/bgm/exclude.txt` に 1 行に 1 つ書きます（`#` 以降はコメント）。次の `bgm` で、その音を選んでいた場面はふるい分けで残った次点を選び直し、次点が無ければ無音になります。除外した ID は同じ本の他の場面でも選びません。`bgm` はこのファイルを読むだけで書き換えません。
+
+### 1 日の上限で止まったとき
+
+Freesound の API は 1 日 2000 回までです。上限に達すると「1 日の上限に達しました」と表示して終了コード 1 で止まり、MP3 は書きません（無音だらけの MP3 を作らないため）。それまでの検索・ふるい分け・採点はキャッシュに保存してあるので、**翌日に同じコマンドをもう一度実行**してください。
+
+### 私的な利用に限る
+
+出力は私的な利用に限り、配布しないでください。小説の著作権があり、Freesound の音には CC0・CC BY・CC BY-NC などのライセンスがあるためです（クレジットは `CREDITS.txt`）。
+
 ## WebUI
 
 試聴（短い文で声・絵文字・パラメータを確認）と、小説全体の生成の両方に使えます。GPU マシンで起動し、Mac のブラウザから開きます。

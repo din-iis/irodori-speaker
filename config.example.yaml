@@ -59,4 +59,23 @@ silence:   # 秒
   paragraph: 0.6
   chapter: 1.0
 
+bgm:
+  secrets_file: ~/.config/irodori-speaker/secrets.env   # FREESOUND_API_KEY=... の 1 行（chmod 600）
+  clap_model: laion/larger_clap_general
+  device: cuda              # cuda | mps | cpu（CLAP）
+  candidates: 12            # 1 回の検索で取る候補数
+  ambient_duration: "[30 TO 900]"
+  music_duration: "[30 TO 300]"
+  scene_chunk_chars: 3000   # LLM に一度に渡す本文の量
+  min_scene_chars: 400      # これより短い場面は前の場面にまとめる（朗読でおよそ 1 分）
+  download_workers: 6
+  ambient_db: -20.0         # 朗読に対する環境音の音量
+  music_db: -3.0            # 朗読に対する音楽の音量
+  intro_seconds: 20.0
+  bridge_seconds: 8.0
+  music_fade_in: 2.0
+  music_fade_out: 3.0
+  ambient_crossfade: 4.0
+  mp3_bitrate: 192k
+
 output_dir: out

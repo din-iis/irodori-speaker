@@ -10,6 +10,7 @@ from .config import Config, load_config
 from .pipeline import (
     BookResult,
     book_dir,
+    build_bgm,
     build_script,
     load_book,
     parse_chapter_range,
@@ -140,6 +141,66 @@ def _run_synth(args, cfg: Config, out_dir: Path) -> int:
     return 0
 
 
+BGM_IMPORT_MISSING = (
+    "BGM の選択には transformers と torch が必要です。"
+    "GPU マシンで `uv sync --frozen --extra tts --extra cu128 --extra bgm` を実行してください（{err}）"
+)
+DAILY_LIMIT = (
+    "Freesound の 1 日の上限に達しました。"
+    "ここまでの結果は保存してあるので、明日もう一度同じコマンドを実行してください"
+)
+
+
+def _run_bgm(args, cfg: Config, out_dir: Path) -> int:
+    from .freesound import DailyLimit, KeyMissing  # requests を bgm 以外で読み込まない
+
+    overrides = {}
+    if args.llm_model:
+        overrides["model"] = args.llm_model
+    if args.think:
+        overrides["think"] = True
+    with tqdm(total=1, desc="BGM", unit="段階") as bar:
+        last = [0]
+
+        def progress(done: int, total: int, msg: str) -> None:
+            bar.total = total
+            bar.set_description(msg)
+            bar.update(done - last[0])
+            last[0] = done
+
+        try:
+            result = build_bgm(
+                cfg,
+                out_dir,
+                chapters=parse_chapter_range(args.chapters),
+                replan=args.replan,
+                llm_overrides=overrides or None,
+                progress=progress,
+            )
+        except KeyMissing as e:
+            print(e)
+            return 2
+        except ImportError as e:
+            print(BGM_IMPORT_MISSING.format(err=e))
+            return 2
+        except DailyLimit:
+            print(DAILY_LIMIT)
+            return 1
+        except (RuntimeError, ValueError) as e:
+            print(e)
+            return 1
+    print("章ごとの MP3 を出力しました:")
+    for p in result.chapter_files:
+        print(f"  {p}")
+    if result.full_path:
+        print(f"通し: {result.full_path}")
+    else:
+        print("通しは未作成です（--chapters で一部の章だけ処理したため）")
+    print(f"見つからなかった音: {result.missing} 件（{out_dir / 'bgm' / 'missing.tsv'}）")
+    print(f"クレジット: {out_dir / 'bgm' / 'CREDITS.txt'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="irodori_speaker", description="小説を Irodori-TTS で読み上げる")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -170,10 +231,18 @@ def main(argv: list[str] | None = None) -> int:
         for o in opts:
             o(p)
 
+    p = sub.add_parser("bgm", help="synth 済みの朗読に環境音と音楽を重ねて MP3 にする")
+    common(p)
+    p.add_argument("--replan", action="store_true", help="場面の区切りをやり直す（場面の説明が変わるので、ふるい分けと採点もやり直し）")
+    p.add_argument("--llm-model", help="LLM のモデル名（config を上書き）")
+    p.add_argument("--think", action="store_true", help="LLM の思考モードを有効にする")
+
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
     out_dir = book_dir(cfg, args.novel)
 
+    if args.command == "bgm":
+        return _run_bgm(args, cfg, out_dir)
     if args.command in ("script", "run"):
         rc = _run_script(args, cfg, out_dir)
         if rc != 0:
