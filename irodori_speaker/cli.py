@@ -317,7 +317,8 @@ def _run_config(args) -> int:
     if args.dry_run:
         print("足すキー（--dry-run のためファイルは書き換えていません）: " + "、".join(f"`{k}`" for k in added))
         return 0
-    bak = path.with_name(path.name + ".bak")
+    path = path.resolve()  # シンボリックリンクならリンク先を書き換える（リンクを普通のファイルにしない）
+    bak = args.config.with_name(args.config.name + ".bak")
     shutil.copy2(path, bak)
     # 一時ファイルは 0600 で作られるので、元のアクセス権を写してから置き換える
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")

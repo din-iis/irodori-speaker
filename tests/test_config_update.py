@@ -335,3 +335,22 @@ def test_cli_update_keeps_file_permissions(tmp_path, mode):
     assert "export:" in path.read_text(encoding="utf-8")
     assert path.stat().st_mode & 0o777 == mode
     assert sorted(p.name for p in tmp_path.iterdir()) == ["config.yaml", "config.yaml.bak"]
+
+
+def test_型の違う値は既定値と同じとみなさず足さない():
+    ex = example_text().replace("narration_intensity_shift: 1", "narration_intensity_shift: 1.0", 1)
+    cfg = drop_lines(example_text(), "narration_intensity_shift:")
+    new_text, added, manual = update_config_text(cfg, ex)
+    assert "narration_intensity_shift" not in added
+    assert any(k == "narration_intensity_shift" for k, _ in manual)
+    assert new_text == cfg
+
+
+def test_シンボリックリンクの設定はリンク先を書き換えてリンクを残す(tmp_path):
+    real = tmp_path / "shared.yaml"
+    real.write_text(drop_section(example_text(), "export"), encoding="utf-8")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(real)
+    assert main(["config", "--update", "-c", str(link)]) == 0
+    assert link.is_symlink()
+    assert "export:" in real.read_text(encoding="utf-8")

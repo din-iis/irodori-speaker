@@ -119,6 +119,22 @@ def _load(text: str, what: str) -> tuple[dict[str, Any], Config]:
     return data, _build(Config, data)
 
 
+def _same_value(a: Any, b: Any) -> bool:
+    """値も型も同じか。整数の設定に 1.0 のような浮動小数を足すと動きが変わるので別とみなす。
+
+    浮動小数の設定（既定 300.0）に整数（300）を書くのは無害なので、そこだけ同じとみなす。
+    """
+    if type(a) is int and type(b) is float:
+        return a == b
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_same_value(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 def _default_of(section: str | None, key: str) -> Any:
     base = Config()
     if section is not None:
@@ -193,7 +209,7 @@ def update_config_text(
             if key in data:
                 continue
             ex_value = _value_of(ex_cfg, None, key)
-            if ex_value != _default_of(None, key):
+            if not _same_value(ex_value, _default_of(None, key)):
                 manual.append((key, ex_value))
             else:
                 added.append(key)
@@ -208,7 +224,7 @@ def update_config_text(
             if child.key in have:
                 continue
             ex_value = _value_of(ex_cfg, key, child.key)
-            if ex_value != _default_of(key, child.key):
+            if not _same_value(ex_value, _default_of(key, child.key)):
                 manual.append((f"{key}.{child.key}", ex_value))
             else:
                 wanted.append(child)
