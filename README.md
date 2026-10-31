@@ -530,8 +530,84 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml \
 - **8GB の制約**: LLM と TTS を同時に載せません。`script`（`run` の前半）の終了後に LLM を解放してから `synth` を行います。
 - **文末の句点・読点**: モデルに渡す前に外します（句点・読点で終わると文末に余計な音が入るため）。`script.tsv` の `text` 列は変えません。
 - **区切り行と章題**: 文字（かな・漢字・英数字）も括弧も絵文字も含まない行は区切り（`break`）になります。連続する区切りは 1 つにまとめ、章の先頭と末尾の区切りは捨てます。区切りや章題を足すと後ろの段落番号がずれますが、同じ章で原文が同じ行の手直しは引き継ぎます（同じ文が複数あるときは文書順に対応づけるので、1 文を消すと隣の行に手直しが移ることがあります）。
-- **既存の本**: 間の設定が章 WAV の署名に入るため、更新後の最初の `synth` は章 WAV の組み直しになります（文ごとのキャッシュは残るので再合成はしません）。
+- **既存の本**: 間の設定が章 WAV の署名に入るため、更新後の最初の `synth` は章 WAV の組み直しになります（文ごとのキャッシュは残るので、新しく合成するのは章題の文だけです）。
 - 1 回に合成するのは 40 文字までです。長い文は読点の位置で分けて合成します（長い文は後半で参照音声の声から離れやすいため）。長い文が 30 秒を超えて切り詰められたときは、`warnings.log` に記録されます。
+
+## GPU マシンでの動作確認
+
+書き出し・品質チェック・場面区切り・読み辞書・話者 LoRA アダプタは、Mac のテストだけで確かめています。GPU マシンで初めて使うときは、短い試験用の本で全機能を通してから、実際の本で書き出してください。
+
+### 準備
+
+```bash
+git pull
+uv sync --frozen --extra tts --extra cu128 --extra webui
+```
+
+新しい設定はすべて既定値で動くので、`config.yaml` は書き換えなくて構いません。試験用に、見出しと区切り行を含む短い小説を作ります。
+
+```bash
+printf '第一章 朝\n\n彼は走った。空は高かった。\n\n　　＊\n\n「待って……」と彼女は言った。\n「どうしたの」\n彼は振り返った――\n◇　◇　◇\n朝が来た。\n\n第二章 夜\n夜になった。\n' > smoke.txt
+```
+
+### 試験用の本で確かめる
+
+1. **台本**: Ollama を動かして `script` を実行し、`out/smoke/script.tsv` を開きます。各章の先頭が `title` の行、`＊` と `◇　◇　◇` が `text` の空いた `break` の行になっていれば合格です。
+
+   ```bash
+   uv run --no-sync python -m irodori_speaker script smoke.txt -c config.yaml
+   ```
+
+2. **合成と間**: `ollama stop <モデル名>` で LLM を止めてから `synth` を実行し、`out/smoke/chapters/01_第一章_朝.wav` を聴きます。章題が読まれること、区切りの位置に約 2 秒の間があること、台詞と地の文の切り替わりと「――」の後に間があることを確かめます。長さは `silence.scene` / `title` / `turn` / `ellipsis` で調整します。
+
+   ```bash
+   uv run --no-sync python -m irodori_speaker synth smoke.txt -c config.yaml
+   ```
+
+3. **品質チェック**: `check` を実行し、`out/smoke/check.tsv` の印を見ます。正常な文に印がほとんど付かなければ合格です。続けて `--asr` も試します。初回は約 1.5 GB のモデルを取得します。`transcript` 列が本文とおおむね合い、正しい文に `cer` の印が付かないことを確かめます。
+
+   ```bash
+   uv run --no-sync python -m irodori_speaker check smoke.txt -c config.yaml
+   uv run --no-sync python -m irodori_speaker check smoke.txt -c config.yaml --asr
+   ```
+
+4. **取り直し**: `out/smoke/script.tsv` の 1 行の `seed` 列に `100` と書き、`synth` をもう一度実行します。1 文だけ合成して終わり、その文の声が変わっていれば合格です。
+5. **読み辞書**: `out/smoke/readings.yaml` に `朝: あさ` のように 1 行書き、`synth` を実行します。辞書に当たる文だけが合成し直され、その文の読みが変わることを確かめます。
+6. **話者 LoRA アダプタ**: 統合前のアダプタのディレクトリを渡して合成し、統合 checkpoint で作った声と同じに聞こえれば合格です。続けて `--lora-adapter none` で合成し、モデルを読み直しても VRAM が足りなくならないことも確かめます。
+
+   ```bash
+   uv run --no-sync python -m irodori_speaker synth smoke.txt -c config.yaml --voice none --lora-adapter <アダプタのディレクトリ> --force
+   uv run --no-sync python -m irodori_speaker synth smoke.txt -c config.yaml --voice none --lora-adapter none --force
+   ```
+
+7. **WebUI**: `--host 0.0.0.0` で起動し、Mac のブラウザで開きます。「小説生成」タブで smoke.txt を選び、表の行をクリックするとその文の音声が出ること、「取り直し」で seed が 1 増えて声が変わること、「チェック」で印の表が出ること、「書き出し」で m4b がダウンロードできることを確かめます。行のクリックは Mac のテストでは確かめられていません。
+
+   ```bash
+   uv run --no-sync python -m irodori_speaker.webui -c config.yaml --host 0.0.0.0
+   ```
+
+### 実際の本で書き出して iPhone で聴く
+
+既存の本は、更新後の最初の `synth` で章 WAV の組み直しになります。区切り・章題・間の設定が章の署名に入るためで、新しく合成するのは章題の文だけです。
+
+```bash
+uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml   # Ollama を動かして
+ollama stop <モデル名>
+uv run --no-sync python -m irodori_speaker synth  novel.txt -c config.yaml
+uv run --no-sync python -m irodori_speaker export novel.txt -c config.yaml  # out/novel/export/novel.m4b
+```
+
+- WebUI の「書き出し」ボタンを使うと、Mac のブラウザに直接ダウンロードできます。AirDrop で iPhone に送り、Apple Books で開きます。
+- 章の一覧が見出しどおりに並ぶこと、章の頭に飛べること、続きから再生できることを確かめます。サイズは 64k のモノラルで 1 時間あたり約 30 MB が目安です。
+- MP3 も試すなら `--format mp3` を付けます。`export/chapters/` に章ごとの MP3 ができます。
+- `bgm` も GPU マシンではまだ通していません。試すなら `bgm` の後に `export novel.txt -c config.yaml --bgm --bitrate 96k` を実行します。
+
+### 確かめた結果として残すこと
+
+- 区切り・章題・台詞の切り替わりの間が自然だったか。長すぎる・短すぎる箇所があれば、その種類。
+- `check` の印のうち、聴いて本当に悪かった文と、問題なかった文の例（`tail` などの定数を実データで調整するため）。
+- `--asr` と `--lora-adapter` がエラーなく動いたか。エラーが出たら、その全文。
+- Apple Books で章が並んだか。
 
 ## テスト
 
