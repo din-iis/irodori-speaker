@@ -27,6 +27,7 @@ from .synth import row_seed, segment_cache_key
 from .pipeline import (
     TSV_FIELDS,
     book_dir,
+    build_bgm,
     build_export,
     build_script,
     check_book,
@@ -93,6 +94,36 @@ def llm_overrides_from_ui(api, base_url, model, think, concurrency) -> dict:
     if not _blank(concurrency):
         out["concurrency"] = max(1, _to_int(concurrency))
     return out
+
+
+BGM_DAILY_LIMIT = (
+    "Freesound の 1 日の上限に達しました。ここまでの結果は保存してあるので、翌日にもう一度押してください"
+)
+
+
+def bgm_error_message(e: Exception) -> str:
+    """build_bgm の例外を画面に出す案内文にする（cli の終了コード別の案内と同じ内容）。"""
+    from .cli import BGM_IMPORT_MISSING
+    from .freesound import DailyLimit
+
+    if isinstance(e, DailyLimit):
+        return BGM_DAILY_LIMIT
+    if isinstance(e, ImportError):
+        return BGM_IMPORT_MISSING.format(err=e)
+    return str(e)
+
+
+def bgm_summary(result, out_dir: Path) -> str:
+    """build_bgm の結果を状態欄の文にする。"""
+    bgm_dir = Path(out_dir) / "bgm"
+    lines = ["✅ BGM を付けました"]
+    if result.full_path:
+        lines.append(f"通し: {result.full_path}")
+    else:
+        lines.append("通しは未作成です（章の範囲で一部の章だけ処理したため）")
+    lines.append(f"見つからなかった音: {result.missing} 件（{bgm_dir / 'missing.tsv'}）")
+    lines.append(f"クレジット: {bgm_dir / 'CREDITS.txt'}")
+    return "\n".join(lines)
 
 
 def dataframe_rows(rows: list[dict]) -> list[list]:
@@ -964,6 +995,37 @@ def build_app(cfg: Config):
         note = "（変更なし）" if result.skipped else ""
         return str(result.path), f"✅ 書き出しました{note}: {result.path}"
 
+    def add_bgm(novel_file, novel_text, chapters, api, base_url, model, think, concurrency):
+        """選んだ小説に bgm を付ける。出力は (状態, 通しの MP3, 章ごとの MP3)。"""
+        keep = gr.update()
+        try:
+            novel = _novel_path(novel_file, novel_text)
+            out_dir = book_dir(cfg, novel)
+            yield release_tts(), keep, keep
+            overrides = llm_overrides_from_ui(api, base_url, model, think, concurrency)
+            def work(progress):
+                return build_bgm(
+                    cfg, out_dir, chapters=parse_chapter_range(chapters),
+                    llm_overrides=overrides, progress=progress,
+                )
+
+            step = stream_progress(work)
+            result = None
+            try:
+                while True:
+                    done, total, msg = next(step)
+                    yield f"🎵 BGM: {msg}（{done}/{total}）", keep, keep
+            except StopIteration as stop:
+                result = stop.value
+        except Exception as e:  # noqa: BLE001 KeyMissing / DailyLimit / ImportError / ValueError などを案内にする
+            print(f"[webui] BGM: {e}")
+            raise gr.Error(bgm_error_message(e)) from e
+        yield (
+            bgm_summary(result, out_dir),
+            str(result.full_path) if result.full_path else None,
+            [str(p) for p in result.chapter_files],
+        )
+
     def stop_run():
         stop_flag.set()
         gr.Info("停止を要求しました。現在の文の合成が終わり次第止まります")
@@ -1102,6 +1164,11 @@ def build_app(cfg: Config):
             full_audio = gr.Audio(type="filepath", label="全体の WAV")
 
             with gr.Row():
+                bgm_btn = gr.Button("BGM を付ける（synth 済みの小説に環境音と音楽を重ねる）")
+            bgm_audio = gr.Audio(type="filepath", label="BGM 付きの通し MP3")
+            bgm_files = gr.Files(label="BGM 付きの章 MP3")
+
+            with gr.Row():
                 export_format = gr.Dropdown(["m4b", "mp3"], value=cfg.export.format, label="書き出し形式")
                 export_bgm = gr.Checkbox(label="BGM 付き（bgm の MP3 から）")
                 export_btn = gr.Button("書き出し")
@@ -1116,6 +1183,10 @@ def build_app(cfg: Config):
             ]
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):
                 btn.click(make_handler(mode), novel_inputs, novel_outputs, **gpu)
+            bgm_btn.click(
+                add_bgm, [novel_file, novel_text, chapters, *llm_inputs],
+                [novel_status, bgm_audio, bgm_files], **gpu,
+            )
             stop_btn.click(stop_run, None, None)
             table.select(
                 select_row,
