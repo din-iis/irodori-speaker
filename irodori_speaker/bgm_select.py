@@ -539,15 +539,25 @@ def load_selection(path: Path) -> list[Choice]:
 
 
 def write_missing(path: Path, choices: list[Choice], scenes: dict[int, list[Scene]]) -> None:
-    lines = ["\t".join(["chapter", "scene", "start_para", "kind", "description", "query", "reason"])]
+    """選べなかった枠を章 → 場面の順に書く。LLM が失敗した場面（枠が無い）も llm_error で書く。"""
+    rows: list[tuple[int, int, list[str]]] = []
     for c in choices:
         if c.reason is None:
             continue
         sc = next((x for x in scenes.get(c.chapter, []) if x.index == c.scene), None)
         if sc is None or (c.kind == "ambient" and sc.ambient_query is None):
             continue  # 意図した無音
-        lines.append("\t".join([
+        rows.append((c.chapter, c.scene, [
             str(c.chapter + 1), str(c.scene), str(sc.start_para), c.kind,
             _one_line(sc.description), _one_line(c.query), c.reason,
         ]))
+    for chapter_scenes in scenes.values():
+        for sc in chapter_scenes:
+            if sc.status == "llm_error":
+                rows.append((sc.chapter, sc.index, [
+                    str(sc.chapter + 1), str(sc.index), str(sc.start_para), "ambient", "", "", "llm_error",
+                ]))
+    rows.sort(key=lambda r: r[:2])  # 安定ソート: 同じ場面の行は choices の順のまま
+    lines = ["\t".join(["chapter", "scene", "start_para", "kind", "description", "query", "reason"])]
+    lines.extend("\t".join(r[2]) for r in rows)
     _write_text(path, "\n".join(lines) + "\n")

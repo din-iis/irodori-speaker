@@ -540,3 +540,20 @@ def test_gate_schema_forbids_additional_properties():
 
     assert GATE_SCHEMA["additionalProperties"] is False
     assert GATE_SCHEMA["properties"]["results"]["items"]["additionalProperties"] is False
+
+
+def test_write_missing_lists_llm_error_scenes_in_order(tmp_path):
+    bad = scene(1, ambient=None, music="")
+    bad.status = "llm_error"
+    scenes = {0: [scene(0), bad, scene(2, ambient=None, music="")], 1: [scene(0, chapter=1, ambient=None, music="")]}
+    # 場面 2 は status ok の意図した無音なので出さない。場面 0 の choice は場面 1 の行より前に並ぶ
+    choices = [choice(0, 2, "bridge", reason="no_result"), choice(0, 0, "ambient", reason="no_result")]
+    path = tmp_path / "missing.tsv"
+    write_missing(path, choices, scenes)
+    rows = [line.split("\t") for line in path.read_text(encoding="utf-8").splitlines()[1:]]
+    assert [(r[0], r[1], r[3], r[6]) for r in rows] == [
+        ("1", "0", "ambient", "no_result"),
+        ("1", "1", "ambient", "llm_error"),
+        ("1", "2", "bridge", "no_result"),
+    ]
+    assert rows[1] == ["1", "1", "10", "ambient", "", "", "llm_error"]
