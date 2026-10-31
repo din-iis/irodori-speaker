@@ -455,6 +455,13 @@ def _build_bgm(
                 f"章 {idx + 1} の段落の時刻がありません。synth --chapters {idx + 1} を実行してください"
                 "（文のキャッシュがあるので音声合成はやり直しません）"
             ) from None
+        # 台本を更新して一部の章だけ synth し直した場合の食い違い（段落の並びだけを比べる。
+        # 段落の中の文言だけの変更は検出できない。署名の完全な照合には synth の latent_key が要る）
+        script_paras = sorted({int(r["para"]) for r in rows if int(r["chapter"]) == idx})
+        if sorted(times[idx][2]) != script_paras:
+            raise ValueError(
+                f"章 {idx + 1} の朗読が今の台本と合いません。synth --chapters {idx + 1} を実行してください"
+            )
         if not _sig_path(wav).exists():  # synth が途中で止まった章
             raise ValueError(
                 f"章 {idx + 1} の朗読の署名がありません。synth --chapters {idx + 1} を実行してください"

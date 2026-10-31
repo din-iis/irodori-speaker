@@ -198,6 +198,7 @@ uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml --rea
 ### 前提
 
 - `synth` を済ませ、章の WAV と `.times.json`・`.sig` があること。どちらかが無い章（`synth` が途中で止まった章など）があれば、`synth --chapters N` を案内して止まります（文のキャッシュがあるので音声合成はやり直しません）。
+- 台本を更新したのに `synth` し直していない章は、段落の並びが `.times.json` と違うときに同じ案内で止まります。段落の中の文言だけを直した場合は検出できないので、台本を直したら `synth` を実行し直してください。
 - GPU マシンで `uv sync --frozen --extra tts --extra cu128 --extra bgm` を実行する。Ollama が動いていること（`script` と同じ）。FFmpeg が必要。
 - Freesound の API キーを、**自分の端末で**ファイルに書く。キーを環境変数やシェルの設定ファイルに置かないのは、AI のエージェントが読めてしまうため。`bgm` はこのファイルだけを読み、キーを画面・ログ・キャッシュに書かない。ファイルが無いかキーの行が無ければ、手順を表示して終了コード 2 で止まる。
 

@@ -582,3 +582,25 @@ def test_unreadable_cached_preview_is_removed_and_refetched(tmp_path):
     build_bgm(cfg2, out_dir, deps=make_deps(calls))
     assert calls.count("download") == 1
     assert cached.exists()
+
+
+def test_script_with_extra_paragraph_stops_before_llm(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    _, rows = pipeline.load_book(out_dir)
+    last = max((r for r in rows if int(r["chapter"]) == 1), key=lambda r: int(r["para"]))
+    extra = {**last, "para": int(last["para"]) + 1, "seg": 0}  # 台本だけ段落が 1 つ増えた
+    pipeline.write_script(out_dir / "script.tsv", pipeline._sorted_rows([*rows, extra]))
+    calls: list = []
+    with pytest.raises(ValueError, match="章 2 の朗読が今の台本と合いません。synth --chapters 2"):
+        build_bgm(cfg, out_dir, deps=make_deps(calls))
+    assert calls == []
+    # 食い違いのない章だけを対象にすれば通る手前（事前検証）まで進む
+    with pytest.raises(ValueError, match="対象の章がありません"):
+        build_bgm(cfg, out_dir, chapters={9}, deps=make_deps(calls))
+
+
+@needs_ffmpeg
+def test_script_matching_narration_passes_precheck(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    result = build_bgm(cfg, out_dir, deps=make_deps([]))
+    assert len(result.chapter_files) == 2
