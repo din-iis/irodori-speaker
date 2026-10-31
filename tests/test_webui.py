@@ -68,14 +68,15 @@ def _row(seg: int, text: str) -> dict:
         "labels": "neutral:1",
         "text": text,
         "source": f"原文{seg}",
+        "seed": "",
     }
 
 
 def test_rows_from_dataframe_は_text_列だけ反映する():
     original = [_row(0, "あ"), _row(1, "い")]
     df_rows = [
-        ["0", "0", "0", "dialogue", "happy:3", "😊あ", "改ざん"],
-        ["0", "0", "1", "narration", "neutral:1", "い", "原文1"],
+        ["0", "0", "0", "dialogue", "happy:3", "😊あ", "改ざん", ""],
+        ["0", "0", "1", "narration", "neutral:1", "い", "原文1", ""],
     ]
     got = rows_from_dataframe(df_rows, original)
     assert [r["text"] for r in got] == ["😊あ", "い"]
@@ -87,37 +88,37 @@ def test_rows_from_dataframe_は_text_列だけ反映する():
 
 def test_rows_from_dataframe_は元の行を変更しない():
     original = [_row(0, "あ")]
-    rows_from_dataframe([["0", "0", "0", "", "", "X", ""]], original)
+    rows_from_dataframe([["0", "0", "0", "", "", "X", "", ""]], original)
     assert original[0]["text"] == "あ"
 
 
 def test_rows_from_dataframe_は数値型のキーでも対応づける():
     original = [_row(0, "あ")]
-    got = rows_from_dataframe([[0, 0.0, 0, "", "", "X", ""]], original)
+    got = rows_from_dataframe([[0, 0.0, 0, "", "", "X", "", ""]], original)
     assert got[0]["text"] == "X"
 
 
 def test_rows_from_dataframe_は欠損の_text_を空文字にする():
     original = [_row(0, "あ")]
-    got = rows_from_dataframe([["0", "0", "0", "", "", float("nan"), ""]], original)
+    got = rows_from_dataframe([["0", "0", "0", "", "", float("nan"), "", ""]], original)
     assert got[0]["text"] == ""
 
 
 def test_rows_from_dataframe_は_pandas_の_DataFrame_も受け付ける():
     pd = pytest.importorskip("pandas")
     original = [_row(0, "あ")]
-    df = pd.DataFrame([["0", "0", "0", "", "", "X", ""]], columns=TSV_FIELDS)
+    df = pd.DataFrame([["0", "0", "0", "", "", "X", "", ""]], columns=TSV_FIELDS)
     assert rows_from_dataframe(df, original)[0]["text"] == "X"
 
 
 def test_rows_from_dataframe_は台本に無い行を拒否する():
     with pytest.raises(ValueError):
-        rows_from_dataframe([["9", "9", "9", "", "", "X", ""]], [_row(0, "あ")])
+        rows_from_dataframe([["9", "9", "9", "", "", "X", "", ""]], [_row(0, "あ")])
 
 
 def test_rows_from_dataframe_は行が足りなければ拒否する():
     with pytest.raises(ValueError):
-        rows_from_dataframe([["0", "0", "0", "", "", "X", ""]], [_row(0, "あ"), _row(1, "い")])
+        rows_from_dataframe([["0", "0", "0", "", "", "X", "", ""]], [_row(0, "あ"), _row(1, "い")])
 
 
 def test_rows_from_dataframe_は元の行が空なら空を返す():
@@ -173,7 +174,7 @@ def test_画面が起動する(tmp_path):
 
 
 def test_dataframe_rows_は_TSV_列順の配列にする():
-    assert dataframe_rows([_row(0, "あ")]) == [["0", "0", "0", "narration", "neutral:1", "あ", "原文0"]]
+    assert dataframe_rows([_row(0, "あ")]) == [["0", "0", "0", "narration", "neutral:1", "あ", "原文0", ""]]
 
 
 def test_stream_progress_は進捗を流し戻り値を返す():
@@ -313,15 +314,15 @@ def test_show_script_は同じ小説なら表を変えない(monkeypatch, tmp_pa
     (out_dir / "chapters.json").write_text('{"chapters": [{"idx": 0, "title": "t"}]}', encoding="utf-8")
     write_script(out_dir / "script.tsv", [_row(0, "あ")])
 
-    table, rows, status, loaded = fns["show_script"](None, str(novel), None)
+    table, rows, status, loaded, *_clear = fns["show_script_clearing"](None, str(novel), None)
     assert rows and loaded == str(novel)
-    again = fns["show_script"](None, str(novel), loaded)
+    again = fns["show_script_clearing"](None, str(novel), loaded)
     assert again[1] == {"__type__": "update"} and again[0] == {"__type__": "update"}
     assert again[3] == loaded
 
     other = tmp_path / "m.txt"
     other.write_text("本文", encoding="utf-8")
-    assert fns["show_script"](None, str(other), loaded)[3] == str(other)
+    assert fns["show_script_clearing"](None, str(other), loaded)[3] == str(other)
 
 
 def replace_output(cfg, tmp_path):

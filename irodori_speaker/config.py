@@ -105,6 +105,14 @@ class BgmConfig:
 
 
 @dataclass
+class CheckConfig:
+    z_threshold: float = 3.0
+    cer_threshold: float = 0.3
+    asr_model: str = "kotoba-tech/kotoba-whisper-v2.0"
+    asr_device: str = "cuda"
+
+
+@dataclass
 class ExportConfig:
     format: str = "m4b"  # m4b | mp3
     bitrate: str = "64k"
@@ -137,6 +145,7 @@ class Config:
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     read_chapter_title: bool = True
     bgm: BgmConfig = field(default_factory=BgmConfig)
+    check: CheckConfig = field(default_factory=CheckConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     output_dir: str = "out"
 
@@ -147,6 +156,7 @@ _SECTIONS = {
     "split": SplitConfig,
     "silence": SilenceConfig,
     "bgm": BgmConfig,
+    "check": CheckConfig,
     "export": ExportConfig,
 }
 

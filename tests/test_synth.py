@@ -535,3 +535,27 @@ def test_no_ref_latent_key_depends_only_on_codec_repo(tmp_path):
     s = Synthesizer(replace(base, codec_repo="other/codec"), tmp_path / "seg", [], tmp_path / "lat")
     assert s.latent_key == synth.no_ref_latent_key(replace(base, codec_repo="other/codec"))
     assert s.latent_key != Synthesizer(base, tmp_path / "seg", [], tmp_path / "lat").latent_key
+
+
+def test_cache_key_は_seed_の上書きで変わり_None_なら_config_の_seed():
+    cfg = Config(device="cpu")
+    base = cache_key(cfg, "hi", "L")
+    assert cache_key(cfg, "hi", "L", None) == base
+    assert cache_key(cfg, "hi", "L", 7) != base
+    assert cache_key(cfg, "hi", "L", 7) == cache_key(replace(cfg, sampling=replace(cfg.sampling, seed=7)), "hi", "L")
+
+
+def test_synthesize_は_seed_をキーと_request_に使う(make_synth):
+    s, rt = make_synth()
+    path = s.synthesize("hi", seed=7)
+    assert path.stem == cache_key(s.cfg, "hi", s.latent_key, 7)
+    assert rt.calls[0].seed == 7
+
+
+def test_synthesize_は_seed_None_なら_config_の_seed_のまま(make_synth):
+    s, rt = make_synth(cfg=Config(device="cpu", sampling=replace(Config().sampling, seed=None)))
+    s.synthesize("hi", seed=None)
+    assert rt.calls[0].seed is None
+    s2, rt2 = make_synth()
+    s2.synthesize("hi")
+    assert rt2.calls[0].seed == 42

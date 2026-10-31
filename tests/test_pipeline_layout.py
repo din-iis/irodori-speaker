@@ -66,7 +66,7 @@ class FakeSynth:
         self.segments_dir = segments_dir
         self.texts: list[str] = []
 
-    def synthesize(self, text: str, force: bool = False) -> Path:
+    def synthesize(self, text: str, force: bool = False, seed: int | None = None) -> Path:
         self.texts.append(text)
         self.segments_dir.mkdir(parents=True, exist_ok=True)
         path = self.segments_dir / f"{hashlib.sha1(text.encode()).hexdigest()}.wav"

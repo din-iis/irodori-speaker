@@ -9,12 +9,13 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
+from . import check
 from .assemble import Clip, concat_wavs, safe_name, write_chapter
 from .config import EMOTIONS, Config
-from .synth import TEXT_RULE
+from .synth import TEXT_RULE, row_seed
 from .text_splitter import Chapter, build_chapters, read_text
 
-TSV_FIELDS = ["chapter", "para", "seg", "kind", "labels", "text", "source"]
+TSV_FIELDS = ["chapter", "para", "seg", "kind", "labels", "text", "source", "seed"]
 
 Progress = Callable[[int, int, str], None]
 
@@ -25,6 +26,14 @@ class BookResult:
     full_path: Path | None
     stopped: bool
     stale_chapters: list[int] = field(default_factory=list)  # 1 始まり。台本と一致しない章 WAV
+
+
+@dataclass
+class CheckResult:
+    path: Path  # check.tsv
+    rows: list  # check.CheckRow
+    total: int
+    flagged: int  # 印のある行数
 
 
 @dataclass
@@ -66,10 +75,11 @@ def load_script(path: Path) -> dict[tuple[int, int, int], dict]:
     if not path.exists():
         return {}
     with path.open(encoding="utf-8", newline="") as f:
-        return {
-            (int(r["chapter"]), int(r["para"]), int(r["seg"])): r
-            for r in csv.DictReader(f, delimiter="\t")
-        }
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    for r in rows:
+        for name in TSV_FIELDS:  # 古いファイル（seed 列なし）も読めるようにする
+            r.setdefault(name, "")
+    return {(int(r["chapter"]), int(r["para"]), int(r["seg"])): r for r in rows}
 
 
 def write_script(path: Path, rows: list[dict]) -> None:
@@ -274,10 +284,10 @@ def _match_saved_rows(chapters: list[Chapter], overrides: dict) -> dict[tuple[in
 
 
 def _row_from_saved(s, r: dict) -> dict:
-    return _row(s, r["labels"], r["text"])
+    return _row(s, r["labels"], r["text"], r.get("seed", ""))
 
 
-def _row(s, labels: str, text: str) -> dict:
+def _row(s, labels: str, text: str, seed: str = "") -> dict:
     return {
         "chapter": s.chapter_idx,
         "para": s.para_idx,
@@ -286,6 +296,7 @@ def _row(s, labels: str, text: str) -> dict:
         "labels": labels,
         "text": text,
         "source": s.text,
+        "seed": seed,
     }
 
 
@@ -322,7 +333,7 @@ def synthesize_book(
                 if r.get("kind") == "break":
                     clips.append(Clip(None, int(r["chapter"]), int(r["para"]), int(r["seg"]), kind="break"))
                     continue
-                path = synth.synthesize(spoken_text(r), force=force)
+                path = synth.synthesize(spoken_text(r), force=force, seed=row_seed(r))
                 clips.append(Clip(path, int(r["chapter"]), int(r["para"]), int(r["seg"]),
                                   kind=r.get("kind", "narration"), text=spoken_text(r)))
                 done += 1
@@ -368,6 +379,75 @@ def synthesize_book(
     else:
         _remove_old_full(out_dir)
     return BookResult(chapter_files, full, stopped=False, stale_chapters=stale)
+
+
+def check_book(
+    cfg: Config,
+    out_dir: Path,
+    *,
+    chapters: set[int] | None = None,
+    asr: bool = False,
+    progress: Progress | None = None,
+    transcriber: Callable[[list[Path]], list[str]] | None = None,
+) -> CheckResult:
+    """合成済みの文（segments/）を調べて、怪しい文に印を付けた check.tsv を書く。GPU は ASR のときだけ使う。"""
+    from .readings import apply_readings, load_readings
+    from .synth import Synthesizer
+    from .voices import is_no_ref, resolve_voice
+
+    titles, rows = load_book(out_dir)
+    rows = [
+        r for r in rows
+        if r.get("kind") != "break" and (chapters is None or int(r["chapter"]) + 1 in chapters)
+    ]
+    if not rows:
+        raise ValueError("対象の章がありません")
+    if not cfg.voice:
+        raise ValueError("config の voice か --voice で声を指定してください")
+    voice_paths = [] if is_no_ref(cfg.voice) else resolve_voice(Path(cfg.voices_dir), cfg.voice)
+    readings = load_readings(cfg, out_dir)
+    synth = Synthesizer(
+        cfg, out_dir / "segments", voice_paths, Path(cfg.output_dir) / ".voices",
+        readings=readings,  # LoRA は cfg.lora_adapter から Synthesizer が読む
+    )
+    warned = check.read_warned_keys(out_dir / "warnings.log")
+
+    checked: list[check.CheckRow] = []
+    for i, r in enumerate(rows):
+        key = check.segment_key(synth, r)
+        checked.append(
+            check.CheckRow(
+                chapter=int(r["chapter"]), para=int(r["para"]), seg=int(r["seg"]), key=key,
+                text=r["text"], chars=check.count_chars(apply_readings(r["text"], readings)),
+                stats=check.analyze_file(synth.segments_dir / f"{key}.wav"), z=None, offset=None,
+            )
+        )
+        if progress:
+            progress(i + 1, len(rows), f"文 {i + 1}/{len(rows)}")
+    per_char = [
+        c.stats.seconds / c.chars if c.stats is not None and c.chars > 0 else None for c in checked
+    ]
+    for c, z in zip(checked, check.robust_z(per_char)):
+        c.z = z
+    times: dict[int, dict | None] = {}
+    for c in checked:
+        if c.chapter not in times:
+            times[c.chapter] = check.load_times_json(_chapter_path(out_dir, c.chapter, titles))
+        c.offset = check.offset_for(times[c.chapter], c.para, c.seg)
+    targets = [c for c in checked if c.stats is not None] if asr else []
+    if targets:  # 認識する WAV が無ければモデルを読み込まない（missing のレポートだけ出す）
+        transcribe = transcriber or check.transcribe_with(cfg.check)
+        texts = transcribe([synth.segments_dir / f"{c.key}.wav" for c in targets])
+        for c, hyp in zip(targets, texts):
+            c.transcript = hyp
+            spoken = apply_readings(c.text, readings)  # モデルが読んだ本文を参照にする（text 列は原文のまま）
+            ref = check.normalize_for_cer(check.strip_emoji(check.tts_text(spoken)))
+            c.cer = check.cer(ref, check.normalize_for_cer(hyp))
+    for c in checked:
+        c.flags = check.flags_for(c, cfg.check.z_threshold, cfg.check.cer_threshold, warned)
+    path = out_dir / "check.tsv"
+    check.write_check_tsv(path, checked, asr)
+    return CheckResult(path, checked, len(checked), sum(1 for c in checked if c.flags))
 
 
 def _sounds_path(mp3: Path) -> Path:
@@ -440,6 +520,8 @@ def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
         *_synth_identity(synth),
         TEXT_RULE,
     ]
+    if any(row_seed(r) is not None for r in rows):  # 既存の署名を変えないよう、あるときだけ足す
+        payload.append([row_seed(r) for r in rows])
     return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 

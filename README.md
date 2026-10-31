@@ -153,6 +153,15 @@ uv run --no-sync python -m irodori_speaker script novel.txt -c config.yaml --llm
 uv run --no-sync python -m irodori_speaker synth novel.txt -c config.yaml --voice narrator2 --force
 ```
 
+`check`（[品質チェック](#品質チェックと取り直しcheck)）:
+
+| オプション | 内容 |
+|---|---|
+| `--asr` | 音声認識（kotoba-whisper）で文字誤り率も調べる。transformers が要る |
+| `--voice ID` | `synth --voice` で作った本の鍵に合わせる（config の `voice` を上書き）。`none` も指定できる |
+| `--checkpoint ID` | `synth --checkpoint` で作った本の鍵に合わせる（config の `checkpoint` を上書き） |
+| `--lora-adapter DIR` | `synth --lora-adapter` で作った本の鍵に合わせる。読み辞書（`readings`・`readings.yaml`）も `synth` と同じものを使う |
+
 `--help` で各サブコマンドのオプションを確認できます。
 
 ### 出力
@@ -184,6 +193,7 @@ out/
 | `labels` | 句ごとの `感情:強度` を `\|` で並べた参考情報（例: `happy:2\|neutral:1`）。音声には使われない |
 | `text` | **絵文字入りの読み上げ本文。手直しはここで行う** |
 | `source` | 分割直後の原文。小説本文との一致判定に使うので**編集しない** |
+| `seed` | その文だけの合成 seed。空なら `sampling.seed`。文のキャッシュキーに入るので、**直して `synth` すると直した文だけ作り直します**（`check` で見つけた悪い文の取り直しに使う） |
 
 `text` 列では、絵文字の移動・削除・追加と、読み仮名の修正ができます。直したら `synth` を再実行すると、**直した文だけ**が再合成されます（文ごとのキャッシュは `text` を含むキーで引くため）。
 
@@ -285,6 +295,44 @@ Freesound の API は 1 日 2000 回までです。上限に達すると「1 日
 
 出力は私的な利用に限り、配布しないでください。小説の著作権があり、Freesound の音には CC0・CC BY・CC BY-NC などのライセンスがあるためです（クレジットは `CREDITS.txt`）。
 
+## 品質チェックと取り直し（check）
+
+通しで聴き直さなくても、悪い文を見つけて直せるようにする工程です。`synth` が済んだ本の文（`segments/` の WAV）を調べて、怪しい文に印を付けた `out/<book>/check.tsv` を作ります。
+
+```bash
+uv run --no-sync python -m irodori_speaker check novel.txt -c config.yaml
+# 声や checkpoint を指定して synth したときは、同じものを渡す（キャッシュのキーに入るため）
+uv run --no-sync python -m irodori_speaker check novel.txt -c config.yaml --voice none --checkpoint /path/to/model.safetensors
+# 音声認識で読み間違いも調べる
+uv run --no-sync python -m irodori_speaker check novel.txt -c config.yaml --asr --chapters 1-2
+```
+
+LLM も TTS のモデルも使わないので、GPU は要りません（`--asr` のときだけ使います）。終了時に「N 文中 M 件に印」と表示します。印があっても終了コードは 0 です。
+
+### check.tsv の列と印
+
+列は `chapter / para / seg`（0 始まり）、`key`（`segments/<key>.wav`）、`seconds`、`chars`（モデルが読む文字数。絵文字と文末の句点を除く）、`sec_per_char`、`z`、`flags`、`offset`、`text` です。`--asr` のときだけ `cer`（文字誤り率）と `transcript`（認識結果）が増えます。
+
+`z` は 1 文字あたりの秒数が本全体の中央値からどれだけ外れているかです（中央値と MAD によるロバストな値）。`flags` には次の印が `|` 区切りで入ります。
+
+| 印 | 意味 |
+|---|---|
+| `long` / `short` | `z` が `check.z_threshold`（既定 3.0）以上 / 以下。引き延ばし・早口・途切れの疑い |
+| `clip` | 波形が振り切れているサンプルがある |
+| `tail` | 文末に、長い無音を挟んだ短い孤立音がある（余計な息や声が末尾に入った疑い） |
+| `silent` | 本文があるのに、発話がほとんど無い（発話が 0.1 秒以下。無音の音声） |
+| `missing` | 音声のキャッシュが無い（まだ合成していないか、`--voice` / `--checkpoint` が違う） |
+| `warned` | `warnings.log` に記録がある（`max_seconds` での切り詰めなど） |
+| `cer` | `--asr` で、文字誤り率が `check.cer_threshold`（既定 0.3）以上 |
+
+`offset` は章の WAV の中でその文が始まる秒です（`synth` が書く `.times.json` から求めます）。印の付いた文へそのまま飛んで聴けます。
+
+`--asr` は `uv sync --frozen --extra tts --extra cu128` で入る transformers を使い、初回に `check.asr_model`（既定 `kotoba-tech/kotoba-whisper-v2.0`）をダウンロードします。認識結果は漢字とかなの表記が原文と違うことが多く、文字誤り率は高めに出るので、閾値は緩め（0.3）にしてあります。
+
+### 悪い文を取り直す
+
+悪い文は `script.tsv` の `seed` 列を直して `synth` を再実行します（`seed` は文のキャッシュキーに入るので、直した文だけが作り直しになります）。気に入る声になるまで `seed` を変えて繰り返してください。WebUI ならボタン 1 つで次の `seed` を試せます（後述）。
+
 ## 聴く形式に書き出す（export）
 
 章 WAV を、iPhone の Apple Books などで聴きやすい形に書き出します。既定は章マーカー付きの M4B（AAC）で、章の頭に飛べます。MP3 も選べます。Mac は FFmpeg が必要です。
@@ -359,11 +407,17 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 - **一括実行**: 台本を作り、続けて音声にします。音声にする段階では、直前に作った `script.tsv` をそのまま使います（表の編集は使いません）。
 - **停止**: 現在の文の合成が終わり次第、止まります。文ごとにキャッシュしているので、同じ設定で「音声にする」を押し直すと続きから進みます。一括実行で台本の作成中に押したときは、台本を作り終えたところで止まります。
 - **script.tsv を保存**: 表の編集を `script.tsv` に書き戻します。編集できるのは `text` 列だけで、他の列は読み込み時の値のままです。
-
 - **書き出し**: 画面下の「書き出し形式」（m4b / mp3）と「BGM 付き」を選んで押すと、`export` と同じ処理をします（章の範囲は無視して全章）。完了すると書き出したファイルをダウンロードできます。GPU は使わないので、他の生成と並行して押せます。
 
-表の `text` 列の手直しは、CLI の `script.tsv` の手直しと同じ扱いです（前の節を参照）。
+表の `text` 列と `seed` 列の手直しは、CLI の `script.tsv` の手直しと同じ扱いです（前の節を参照）。
 
+**悪い文を直す手順**:
+
+1. 表の行をクリックすると、その文の音声（`segments/` のキャッシュ）が表の下に出ます。音声が無ければ「まだありません」と出ます（モデルは読み込みません）。
+2. **取り直し**: 選んだ文を、今の `seed` に 1 を足した `seed` で合成します（`seed` が空なら `sampling.seed` + 1）。表の `seed` 列が更新され、新しい音声が表示されます。気に入るまで繰り返せます。この時点では `script.tsv` に保存していません。
+3. **音声にする**: 表の `seed` を `script.tsv` に保存して合成するので、直した文が章の WAV に反映されます。
+
+**チェック**: `check` と同じ調べ方（`--asr` なし、GPU なし）で、印の付いた文だけを下の表に出します（全行は `check.tsv`）。表を編集していれば、先に `script.tsv` に保存します。
 
 ## 設定
 
@@ -390,6 +444,8 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 | `split.chapter_regex` | 「第N章/話/節」「プロローグ」「エピローグ」 | 章の見出しの正規表現。見出しが無ければ全体を 1 章にする |
 | `silence.*` | 文 0.25 / 段落 0.6 / 章 1.0 / title 1.0 / scene 2.0 / turn 0.4 / ellipsis 0.6 | 結合時に挟む無音（秒）。文・段落の間と特別な間（title: 章題の後、scene: 区切り行の位置、turn: 同じ段落で台詞と地の文が切り替わる所、ellipsis: 前の文が `…‥―—` で終わる所）のうち**長い方**を入れる |
 | `read_chapter_title` | `true` | 章の見出しを読み上げる（`false` で読まない） |
+| `check.*` | `z_threshold` 3.0 / `cer_threshold` 0.3 / `asr_model` `kotoba-tech/kotoba-whisper-v2.0` / `asr_device` `cuda` | `check` の印の閾値と、`--asr` のモデル・デバイス |
+
 | `export.*` | m4b / 64k / `null` | `export` の形式（`m4b` か `mp3`）・ビットレート・本の題名（`null` は小説のファイル名） |
 | `output_dir` | `out` | 出力先 |
 
