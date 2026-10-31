@@ -233,14 +233,18 @@ out/<book>/bgm/
   selection.json               場面ごとに選んだ音の ID・名前・作者・URL・ライセンス・点
   gate.tsv                     ふるい分けの採否と理由（外し方の確認用）
   missing.tsv                  見つからなかった音（理由: no_result / all_rejected / llm_error / error）
-  CREDITS.txt                  使った音の題名・作者・URL・ライセンス
+  CREDITS.txt                  残っている章 MP3 で使った音の題名・作者・URL・ライセンス
   exclude.txt                  手で書く除外リスト（下記）
-  chapters/NN_タイトル.mp3     章ごとの BGM 付き MP3（.sig は重ね直しの判定用）
+  chapters/NN_タイトル.mp3     章ごとの BGM 付き MP3（.sig・.sounds.json は重ね直しの判定と CREDITS.txt の元）
   <book>_bgm_full.mp3          通しの MP3（全章が揃うときだけ）
   cache/                       検索・ふるい分け・採点・場面のキャッシュ
 ```
 
-`bgm/tmp/` にダウンロードした音を一時的に置き、重ね終えたら消します。選んだ音の ID とメタデータだけを残し、重ね直すときは選んだ音だけをダウンロードし直します。
+### 試聴 MP3 の共有キャッシュ
+
+Freesound から取得した試聴 MP3 は、本をまたいで共有する `out/.freesound/previews/<Freesound の ID>.mp3` に残し、次からはダウンロードしません（採点にも重ね合わせにも同じものを使います）。1 本が数 MB なので、長編 1 冊（数百本）でおよそ数百 MB〜1 GB が目安です。要らなければ `rm -rf out/.freesound` で消せます（次の `bgm` で必要な分だけ取り直します）。Freesound の規約は必要な範囲の一時的なコピーまでを認めているため、このキャッシュは私的な利用の範囲でだけ使い、他人に渡さないでください。
+
+`CREDITS.txt` は、`bgm/chapters/` に実在する章 MP3 が使っている音から作ります（章 MP3 ごとの `.sounds.json` に使った音を記録しています）。途中で失敗した章の MP3 は消すので、残っている MP3 とクレジットは食い違いません。
 
 ### 違う音を替える（exclude.txt）
 

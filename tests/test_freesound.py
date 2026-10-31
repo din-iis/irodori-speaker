@@ -8,6 +8,7 @@ from irodori_speaker.freesound import (
     FreesoundClient,
     FreesoundError,
     KeyMissing,
+    cached_preview,
     download_preview,
     load_key,
 )
@@ -250,4 +251,32 @@ def test_download_preview_failure_leaves_no_file(tmp_path):
     with pytest.raises(FreesoundError):
         download_preview("https://cdn.freesound.org/p/1.mp3", dst, session=s)
     assert not dst.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def _sound(sid=7):
+    return Sound(sid, "n", [], "", 1.0, "", "u", "https://freesound.org/s/7/", "https://cdn.freesound.org/p/7.mp3")
+
+
+def test_cached_preview_downloads_once(tmp_path):
+    calls = []
+
+    def dl(url, dst):
+        calls.append((url, dst))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"x")
+
+    cache = tmp_path / "c" / "previews"
+    p1 = cached_preview(_sound(), cache, dl)
+    p2 = cached_preview(_sound(), cache, dl)
+    assert p1 == p2 == cache / "7.mp3" and p1.read_bytes() == b"x"
+    assert calls == [("https://cdn.freesound.org/p/7.mp3", cache / "7.mp3")]
+
+
+def test_cached_preview_failure_leaves_no_file(tmp_path):
+    def dl(url, dst):
+        raise FreesoundError("x")
+
+    with pytest.raises(FreesoundError):
+        cached_preview(_sound(), tmp_path, dl)
     assert list(tmp_path.iterdir()) == []

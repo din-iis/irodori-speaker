@@ -50,7 +50,7 @@ class FakeClient:
         self.calls.append(("search", query))
         if self.error is not None:
             raise self.error
-        return [_sound(1 if self.same_sound else {"rain": 1, "piano": 2}[query])]
+        return [_sound(1 if self.same_sound else {"rain": 1, "piano": 2, "wind": 3, "drum": 4}[query])]
 
 
 class FakeScorer:
@@ -67,13 +67,24 @@ def scene_chat(system, user, schema):
     }]}
 
 
+def scene_chat_by_chapter(system, user, schema):
+    """第 1 章（雨）と第 2 章で別の音を探させる。"""
+    rainy = "雨" in user
+    return {"scenes": [{
+        "start_para": 0, "description": "rainy street" if rainy else "windy hill",
+        "ambient_query": "rain" if rainy else "wind", "mood": "calm",
+        "music_query": "piano" if rainy else "drum",
+    }]}
+
+
 def gate_chat(cfg, system, user, schema, name):
     ids = [int(i) for i in re.findall(r"id=(\d+) \|", user)]
     return {"results": [{"id": i, "accept": True, "reason": "ok"} for i in ids]}
 
 
 def make_deps(
-    calls: list, *, client_error: Exception | None = None, same_sound: bool = False
+    calls: list, *, client_error: Exception | None = None, same_sound: bool = False,
+    by_chapter: bool = False,
 ) -> BgmDeps:
     @contextlib.contextmanager
     def server(cfg):
@@ -94,7 +105,7 @@ def make_deps(
 
     return BgmDeps(
         client_factory=lambda key: FakeClient(calls, client_error, same_sound),
-        planner_factory=lambda llm, path: ScenePlanner(llm, path, chat=scene_chat),
+        planner_factory=lambda llm, path: ScenePlanner(llm, path, chat=scene_chat_by_chapter if by_chapter else scene_chat),
         gate_factory=lambda llm, path: Gate(llm, path, chat=gate_chat),
         scorer_factory=scorer,
         server_factory=server,
@@ -103,14 +114,16 @@ def make_deps(
     )
 
 
-def make_book(tmp_path: Path, *, key: bool = True, times: bool = True) -> tuple[Config, Path]:
+def make_book(
+    tmp_path: Path, *, key: bool = True, times: bool = True, novel: Path = NOVEL
+) -> tuple[Config, Path]:
     secrets = tmp_path / "secrets.env"
     if key:
         secrets.write_text("FREESOUND_API_KEY=testkey\n", encoding="utf-8")
     cfg = Config(output_dir=str(tmp_path / "out"))
     cfg = replace(cfg, bgm=replace(cfg.bgm, secrets_file=str(secrets)))
-    out_dir = pipeline.book_dir(cfg, NOVEL)
-    pipeline.build_script(NOVEL, cfg, out_dir, use_emotion=False)
+    out_dir = pipeline.book_dir(cfg, novel)
+    pipeline.build_script(novel, cfg, out_dir, use_emotion=False)
     titles, rows = pipeline.load_book(out_dir)
     for idx in sorted({int(r["chapter"]) for r in rows}):
         clips = []
@@ -148,7 +161,9 @@ def test_build_bgm_end_to_end_with_fakes(tmp_path):
     assert "sound 1 by alice" in (bgm / "CREDITS.txt").read_text(encoding="utf-8")
     for p in result.chapter_files:
         assert p.with_name(p.name + ".sig").exists()
-    assert not (bgm / "tmp").exists() or not list((bgm / "tmp").iterdir())  # ダウンロードした音は消す
+    assert not (bgm / "tmp").exists()  # 試聴 MP3 は本をまたぐ共有キャッシュに置く
+    previews = Path(cfg.output_dir) / ".freesound" / "previews"
+    assert sorted(p.name for p in previews.iterdir()) == ["1.mp3", "2.mp3"]
 
 
 @needs_ffmpeg
@@ -413,15 +428,110 @@ def _exclude_first_sound_run(tmp_path, monkeypatch=None, fail=False):
 
 
 @needs_ffmpeg
-def test_credits_keep_old_lines_when_remix_fails(tmp_path, monkeypatch):
-    text = _exclude_first_sound_run(tmp_path, monkeypatch, fail=True)
-    assert "sound 1 by" in text  # 古い MP3 がまだ残る音のクレジットを失わない
-    assert "sound 2 by" in text
-    assert text.count("sound 2 by") == 1  # 同じ行は 1 回
-
-
-@needs_ffmpeg
 def test_credits_rewritten_with_current_selection_after_success(tmp_path):
     text = _exclude_first_sound_run(tmp_path)
     assert "sound 2 by" in text
     assert "sound 1 by" not in text  # 使わなくなった音の行は落とす
+
+
+# ---------- 試聴 MP3 の共有キャッシュ ----------
+
+
+@needs_ffmpeg
+def test_previews_downloaded_once_for_scoring_and_mixing(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    calls: list = []
+    build_bgm(cfg, out_dir, deps=make_deps(calls))
+    assert calls.count("download") == 2  # ID 1・2 を 1 回ずつ（採点と重ね合わせで共有）
+    cfg2 = replace(cfg, bgm=replace(cfg.bgm, ambient_db=-30.0))  # 署名が変わり重ね直しになる
+    build_bgm(cfg2, out_dir, deps=make_deps(calls))
+    assert calls.count("download") == 2  # 重ね直しでもダウンロードしない
+
+
+@needs_ffmpeg
+def test_previews_shared_between_books(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    build_bgm(cfg, out_dir, deps=make_deps([]))
+    novel2 = tmp_path / "novel2.txt"
+    novel2.write_text(NOVEL.read_text(encoding="utf-8"), encoding="utf-8")
+    cfg2, out_dir2 = make_book(tmp_path, novel=novel2)
+    assert out_dir2 != out_dir and cfg2.output_dir == cfg.output_dir
+    calls: list = []
+    build_bgm(cfg2, out_dir2, deps=make_deps(calls))
+    assert "download" not in calls
+    assert (out_dir2 / "bgm" / "chapters").exists()
+
+
+# ---------- CREDITS.txt は実在する章 MP3 から作る ----------
+
+
+def _credit_ids(out_dir: Path) -> set[int]:
+    text = (out_dir / "bgm" / "CREDITS.txt").read_text(encoding="utf-8")
+    return {int(m) for m in re.findall(r"^sound (\d+) by", text, re.M)}
+
+
+@needs_ffmpeg
+def test_credits_cover_all_chapter_sounds(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    assert _credit_ids(out_dir) == {1, 2, 3, 4}
+    for mp3 in (out_dir / "bgm" / "chapters").glob("*.mp3"):
+        assert mp3.with_name(mp3.name + ".sounds.json").exists()
+
+
+@needs_ffmpeg
+def test_failed_first_chapter_remix_keeps_credits_of_other_chapter(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    first = build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    ch1 = first.chapter_files[0]
+    (out_dir / "bgm" / "exclude.txt").write_text("1\n", encoding="utf-8")  # 1 章目の選択が変わる
+
+    def boom(*a, **k):
+        raise RuntimeError("render 失敗")
+
+    monkeypatch.setattr(bgm_mix, "render", boom)
+    with pytest.raises(RuntimeError, match="render 失敗"):
+        build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    assert not ch1.exists()
+    assert not ch1.with_name(ch1.name + ".sig").exists()
+    assert not ch1.with_name(ch1.name + ".sounds.json").exists()
+    assert first.chapter_files[1].exists()
+    assert _credit_ids(out_dir) == {3, 4}  # 残る 2 章目の MP3 の音だけ
+
+
+@needs_ffmpeg
+def test_partial_rerun_after_failure_credits_new_and_old_sounds(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    (out_dir / "bgm" / "exclude.txt").write_text("1\n", encoding="utf-8")
+    real = bgm_mix.render
+
+    def boom(*a, **k):
+        raise RuntimeError("render 失敗")
+
+    monkeypatch.setattr(bgm_mix, "render", boom)
+    with pytest.raises(RuntimeError):
+        build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    monkeypatch.setattr(bgm_mix, "render", real)
+    result = build_bgm(cfg, out_dir, chapters={1}, deps=make_deps([], by_chapter=True))
+    assert result.full_path is None
+    assert _credit_ids(out_dir) == {2, 3, 4}  # 1 章目の新しい音（ID 1 は除外）と 2 章目の旧い音
+
+
+@needs_ffmpeg
+def test_mp3_without_sounds_json_is_remixed(tmp_path, monkeypatch):
+    cfg, out_dir = make_book(tmp_path)
+    first = build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    ch1 = first.chapter_files[0]
+    ch1.with_name(ch1.name + ".sounds.json").unlink()
+    real = bgm_mix.render
+    n = [0]
+
+    def counting(*a, **k):
+        n[0] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(bgm_mix, "render", counting)
+    build_bgm(cfg, out_dir, deps=make_deps([], by_chapter=True))
+    assert n[0] == 1  # 1 章目だけ重ね直す
+    assert ch1.with_name(ch1.name + ".sounds.json").exists()

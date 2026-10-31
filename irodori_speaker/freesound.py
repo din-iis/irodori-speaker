@@ -181,3 +181,11 @@ def download_preview(url: str, dst: Path, session: requests.Session | None = Non
         os.replace(tmp, dst)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def cached_preview(sound: Sound, cache_dir: Path, download=download_preview) -> Path:
+    """試聴 MP3 を本をまたぐキャッシュ（<cache_dir>/<ID>.mp3）に置いて返す。あれば取得しない。"""
+    dst = Path(cache_dir) / f"{sound.id}.mp3"
+    if not dst.exists():
+        download(sound.preview, dst)  # 一時ファイル経由で書くので、失敗しても壊れたファイルは残らない
+    return dst

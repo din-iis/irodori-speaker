@@ -16,7 +16,7 @@ from . import audio_io
 from .bgm_types import Choice, Scene, Sound
 from .config import BgmConfig, LLMConfig
 from .emotion import chat_json
-from .freesound import DailyLimit, FreesoundError, download_preview
+from .freesound import DailyLimit, FreesoundError, cached_preview, download_preview
 
 GATE_PROMPT_VERSION = 1
 GATE_SYSTEM_PROMPT_AMBIENT = (
@@ -429,11 +429,11 @@ def choose(
     scorer,
     scores_path: Path,
     exclude: set[int],
-    tmp_dir: Path,
+    preview_dir: Path,
     workers: int,
     download=download_preview,
 ) -> list[Choice]:
-    """slot ごとに、ふるい分けで残った候補から CLAP の最高点を選ぶ。"""
+    """slot ごとに、ふるい分けで残った候補から CLAP の最高点を選ぶ。試聴 MP3 は preview_dir に残す。"""
     scores = _read_json(scores_path)
     model = getattr(scorer, "model", "")
     choices: list[Choice] = []
@@ -461,16 +461,14 @@ def choose(
 
         todo = [x for x in cands if ck(x) not in scores]
         if todo:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+            preview_dir.mkdir(parents=True, exist_ok=True)
 
             def fetch(sound: Sound) -> Path | None:
-                dst = tmp_dir / f"{sound.id}.mp3"
                 try:
-                    download(sound.preview, dst)
+                    return cached_preview(sound, preview_dir, download)
                 except (FreesoundError, OSError) as e:
                     print(f"[bgm] 試聴音声を取得できませんでした（{sound.id}）: {e}")
                     return None
-                return dst
 
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers))
             try:
@@ -484,8 +482,6 @@ def choose(
                     scores[ck(sound)] = float(scorer.score(path, sound.duration, s.clap_text))
                 except Exception as e:  # 壊れた音声 1 つで全体を止めない
                     print(f"[bgm] 採点できませんでした（{sound.id}）: {e}")
-                finally:
-                    path.unlink(missing_ok=True)
             _write_json(scores_path, scores)
 
         scored = [(scores[ck(x)], x) for x in cands if ck(x) in scores]

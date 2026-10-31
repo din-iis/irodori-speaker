@@ -372,7 +372,10 @@ class FakeDownload:
         Path(dst).write_bytes(b"x")
 
 
-def run_choose(tmp_path, slots, found, survivors, failures=None, points=None, exclude=None, download=None):
+def run_choose(
+    tmp_path, slots, found, survivors, failures=None, points=None, exclude=None, download=None,
+    scores="scores.json",
+):
     scorer = FakeScorer(points or {})
     download = download or FakeDownload()
     choices = choose(
@@ -381,7 +384,7 @@ def run_choose(tmp_path, slots, found, survivors, failures=None, points=None, ex
         survivors,
         failures or {},
         scorer,
-        tmp_path / "scores.json",
+        tmp_path / scores,
         exclude or set(),
         tmp_path / "dl",
         2,
@@ -401,7 +404,7 @@ def test_choose_picks_highest_score_among_survivors(tmp_path):
     assert (c.chapter, c.scene, c.kind, c.query) == (0, 0, "ambient", "rain")
     assert {name for name, _, _ in scorer.calls} == {"1.mp3", "2.mp3"}  # 3 は残っていない
     assert all(text == "the sound of rain" for _, _, text in scorer.calls)
-    assert not list((tmp_path / "dl").glob("*"))  # 採点後に消す
+    assert sorted(p.name for p in (tmp_path / "dl").glob("*")) == ["1.mp3", "2.mp3"]  # 採点後も残す（共有キャッシュ）
 
 
 def test_choose_excluded_id_falls_to_next_then_all_rejected(tmp_path):
@@ -557,3 +560,15 @@ def test_write_missing_lists_llm_error_scenes_in_order(tmp_path):
         ("1", "2", "bridge", "no_result"),
     ]
     assert rows[1] == ["1", "1", "10", "ambient", "", "", "llm_error"]
+
+
+def test_choose_keeps_previews_and_reuses_them(tmp_path):
+    s = slot()
+    sounds = [snd(id=1), snd(id=2)]
+    run_choose(tmp_path, [s], {s.key: sounds}, {s.key: sounds}, points={1: 0.2, 2: 0.5})
+    assert sorted(p.name for p in (tmp_path / "dl").iterdir()) == ["1.mp3", "2.mp3"]  # 採点後も残る
+    # 採点のキャッシュが無くても、取得済みの試聴 MP3 はダウンロードし直さない
+    _, scorer, download = run_choose(
+        tmp_path, [s], {s.key: sounds}, {s.key: sounds}, points={1: 0.2, 2: 0.5}, scores="other.json"
+    )
+    assert download.calls == [] and len(scorer.calls) == 2

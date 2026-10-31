@@ -320,25 +320,44 @@ def synthesize_book(
     return BookResult(chapter_files, full, stopped=False, stale_chapters=stale)
 
 
-def _write_credits_union(path: Path, choices: list) -> None:
-    """CREDITS.txt を、既存の行と今回の選択の行の和集合（既存の行の順が先）で書く。"""
-    from . import bgm_mix
+def _sounds_path(mp3: Path) -> Path:
+    return mp3.with_name(mp3.name + ".sounds.json")
 
-    new_path = path.with_name(path.name + ".new")
-    try:
-        bgm_mix.write_credits(new_path, choices)
-        new_lines = new_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    finally:
-        new_path.unlink(missing_ok=True)
-    old_lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
-    merged = list(dict.fromkeys(old_lines + new_lines))
+
+def _write_json_atomic(path: Path, data: object) -> None:
     tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text("".join(merged), encoding="utf-8")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _write_credits_from_mp3s(out_dir: Path) -> None:
+    """CREDITS.txt を、実在する章 MP3 の .sounds.json にある音の和集合から作る。"""
+    from . import bgm_mix
+    from .bgm_types import Choice, Sound
+
+    bgm_dir = out_dir / "bgm"
+    if not (bgm_dir / "chapters").exists():
+        return
+    try:
+        titles, _ = load_book(out_dir)
+    except ValueError:
+        return
+    choices: list[Choice] = []
+    for idx in sorted(titles):
+        mp3 = bgm_dir / "chapters" / f"{_chapter_path(out_dir, idx, titles).stem}.mp3"
+        sounds_file = _sounds_path(mp3)
+        if not (mp3.exists() and sounds_file.exists()):
+            continue
+        try:
+            sounds = [Sound.from_dict(d) for d in json.loads(sounds_file.read_text(encoding="utf-8"))]
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        choices.extend(Choice(idx, 0, "ambient", "", snd, None, None) for snd in sounds)
+    bgm_mix.write_credits(bgm_dir / "CREDITS.txt", choices)
 
 
 def _remove_old_full(out_dir: Path) -> None:
@@ -393,6 +412,9 @@ def build_bgm(
         # 事前検証で止まったときも含め、古い通しを残さない
         (out_dir / "bgm" / f"{out_dir.name}_bgm_full.mp3").unlink(missing_ok=True)
         raise
+    finally:
+        # 成功でも失敗でも、実在する章 MP3 で使っている音のクレジットを作り直す
+        _write_credits_from_mp3s(out_dir)
 
 
 def _build_bgm(
@@ -415,7 +437,7 @@ def _build_bgm(
     bgm = cfg.bgm
     bgm_dir = out_dir / "bgm"
     cache_dir = bgm_dir / "cache"
-    tmp_dir = bgm_dir / "tmp"
+    preview_dir = Path(cfg.output_dir) / ".freesound" / "previews"  # 本をまたぐ共有キャッシュ
     full_path = bgm_dir / f"{out_dir.name}_bgm_full.mp3"
 
     titles, rows = load_book(out_dir)
@@ -498,17 +520,13 @@ def _build_bgm(
         choices = bgm_select.choose(
             slots, found, survivors, {**failures, **llm_error}, scorer,
             cache_dir / "scores.json", bgm_select.read_exclude(bgm_dir / "exclude.txt"),
-            tmp_dir, bgm.download_workers,
+            preview_dir, bgm.download_workers,
             **({"download": deps.download} if deps.download else {}),
         )
     finally:
         del scorer
     bgm_select.write_selection(bgm_dir / "selection.json", choices, set(targets), all_chapters)
     bgm_select.write_missing(bgm_dir / "missing.tsv", choices, scenes)
-    # 重ね合わせの途中で失敗しても、残る MP3 のクレジットを失わないよう、既存の行との和集合で先に書く
-    credits_path = bgm_dir / "CREDITS.txt"
-    selected = bgm_select.load_selection(bgm_dir / "selection.json")
-    _write_credits_union(credits_path, selected)
 
     # 5. 章ごとの重ね合わせ
     download = deps.download or freesound.download_preview
@@ -533,27 +551,26 @@ def _build_bgm(
             mp3.exists()
             and sig_file.exists()
             and sig_file.read_text(encoding="utf-8").strip() == signature
+            and _sounds_path(mp3).exists()
         ):
             continue
         sig_file.unlink(missing_ok=True)  # 書き込みに失敗したら stale 扱いにする
-        downloaded: list[Path] = []
         try:
             layout = bgm_mix.build_layout(sr, frames, paras_t, scenes[idx], chapter_choices, bgm)
             sounds = {}
+            used: dict[int, object] = {}  # この MP3 で実際に使った音（初めて使った順）
             decoded: dict[int, object] = {}  # 同じ音は章の中で 1 回だけ読む（render は素材を書き換えない）
             for track in [*layout.ambient, *layout.music]:
                 sound = chapter_choices[track.key].sound
-                dst = tmp_dir / f"{sound.id}.mp3"
-                if dst not in downloaded:
-                    downloaded.append(dst)
+                if sound.id not in decoded:
                     try:
-                        download(sound.preview, dst)
+                        dst = freesound.cached_preview(sound, preview_dir, download)
                     except (freesound.FreesoundError, OSError) as e:
                         raise RuntimeError(
                             f"章 {idx + 1} で使う音をダウンロードできませんでした（ID {sound.id}）: {e}"
                         ) from None
-                if sound.id not in decoded:
                     decoded[sound.id] = audio_io.decode(dst, sr, 2)
+                    used[sound.id] = sound
                 sounds[track.key] = decoded[sound.id]
             import soundfile as sf
 
@@ -562,16 +579,13 @@ def _build_bgm(
                 narration = narration[:, 0]
             audio = bgm_mix.render(layout, narration, sounds, sr, bgm)
             audio_io.write_mp3(audio, sr, mp3, bgm.mp3_bitrate)
+            _write_json_atomic(_sounds_path(mp3), [x.to_dict() for x in used.values()])
+            sig_file.write_text(signature, encoding="utf-8")
         except BaseException:
-            mp3.unlink(missing_ok=True)  # 古い音の MP3 を残さない（CREDITS.txt と食い違うため）
-            raise
-        finally:
-            for p in downloaded:
+            # 古い音の MP3 を残さない（CREDITS.txt と食い違うため）
+            for p in (mp3, sig_file, _sounds_path(mp3)):
                 p.unlink(missing_ok=True)
-        sig_file.write_text(signature, encoding="utf-8")
-
-    # 全章を重ね終えたので、今回の選択だけに書き直す（使わなくなった音の行を落とす）
-    bgm_mix.write_credits(credits_path, selected)
+            raise
 
     # 6. 通し
     # 通しは、章タイトルにある全章の MP3 が今回の署名と一致するときだけ（rows に無い章があれば作らない）
