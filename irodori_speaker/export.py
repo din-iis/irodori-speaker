@@ -89,6 +89,17 @@ def collect_chapters(inputs: list[ExportInput], rows: list[dict], *, source: str
     return chapters
 
 
+def input_stamps(chapters: list[ExportChapter]) -> list[tuple[tuple[int, int], str]]:
+    """各入力の今の (stamp, .sig の中身)。collect_chapters の時点と比べて、書き出し中の更新を検出する。"""
+    from .pipeline import _sig_path
+
+    result = []
+    for c in chapters:
+        st = c.src.stat()
+        result.append(((st.st_size, st.st_mtime_ns), _read(_sig_path(c.src))))
+    return result
+
+
 def chapter_starts_ms(chapters: list[ExportChapter]) -> list[int]:
     """各章の開始ミリ秒と、最後に全体の終わり（章数 + 1 個）。累積 frames から丸めるのでずれが溜まらない。"""
     sr = chapters[0].sr

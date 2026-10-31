@@ -630,3 +630,47 @@ def test_build_export_mp3_encode_failure_removes_old_named_chapters(tmp_path, mo
     assert not old_named.exists()
     assert not list(chapter_dir.glob("*.mp3"))
     assert not first.path.exists() and not pipeline._sig_path(first.path).exists()
+
+
+# ---------- 追加修正 4: 書き出し中の入力更新 ----------
+
+
+def test_input_stamps_reflect_file_and_sig(tmp_path):
+    _cfg, out_dir = make_book(tmp_path)
+    inputs, rows = inputs_for(out_dir)
+    chapters = export.collect_chapters(inputs, rows, source="narration")
+    before = export.input_stamps(chapters)
+    assert before == [(c.stamp, c.sig) for c in chapters]
+    pipeline._sig_path(inputs[1].wav).write_text("changed", encoding="utf-8")
+    after = export.input_stamps(chapters)
+    assert after[0] == before[0] and after[1] != before[1]
+
+
+def _rewrite_wav_after(real, target: Path):
+    def wrapper(*a, **k):
+        real(*a, **k)
+        sf.write(target, _tone(0.2), SR)  # 合成側が章 WAV を置き換えた
+
+    return wrapper
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("fmt", ["m4b", "mp3"])
+def test_build_export_fails_when_input_changes_during_export(tmp_path, monkeypatch, fmt):
+    cfg, out_dir = make_book(tmp_path)
+    wav = pipeline._chapter_path(out_dir, 0, pipeline.load_book(out_dir)[0])
+    name = "write_m4b" if fmt == "m4b" else "encode_file"
+    monkeypatch.setattr(audio_io, name, _rewrite_wav_after(getattr(audio_io, name), wav))
+    with pytest.raises(RuntimeError, match="書き出し中に章の音声が更新されました"):
+        pipeline.build_export(cfg, out_dir, fmt=fmt)
+    full, chapter_dir = export.export_paths(out_dir, source="narration", fmt=fmt)
+    assert not full.exists() and not pipeline._sig_path(full).exists()
+    if chapter_dir is not None:
+        assert not list(chapter_dir.glob("*.mp3"))
+
+
+@needs_ffmpeg
+def test_build_export_succeeds_when_inputs_unchanged(tmp_path):
+    cfg, out_dir = make_book(tmp_path)
+    result = pipeline.build_export(cfg, out_dir)
+    assert result.path.exists() and pipeline._sig_path(result.path).exists()

@@ -721,6 +721,8 @@ def build_export(
                 tick(f"章 {n}/{len(chapters)}")
             audio_io.concat_mp3(chapter_paths, full)
             tick("通しを連結")
+        if export.input_stamps(chapters) != [(c.stamp, c.sig) for c in chapters]:
+            raise RuntimeError("書き出し中に章の音声が更新されました。もう一度書き出してください")
         sig_file.write_text(signature, encoding="utf-8")
         if chapter_dir is not None:
             # 章題の変更・章の削除で残った旧い章 MP3（chapter_dir は export 専用）
