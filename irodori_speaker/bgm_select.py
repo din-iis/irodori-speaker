@@ -338,7 +338,7 @@ def write_gate_tsv(path: Path, rows: list[dict]) -> None:
     lines = ["\t".join(["chapter", "scene", "kind", "id", "name", "accept", "reason"])]
     for r in rows:
         lines.append("\t".join([
-            cell(r["chapter"]), cell(r["scene"]), cell(r["kind"]), cell(r["id"]),
+            cell(r["chapter"] + 1), cell(r["scene"]), cell(r["kind"]), cell(r["id"]),
             cell(r["name"]), "accept" if r["accept"] else "reject", cell(r["reason"]),
         ]))
     _write_text(path, "\n".join(lines) + "\n")
@@ -514,10 +514,15 @@ def read_exclude(path: Path) -> set[int]:
     return ids
 
 
-def write_selection(path: Path, choices: list[Choice], keep_chapters: set[int]) -> None:
-    """今回の章を置き換え、keep_chapters に無い章を落とす。"""
+def write_selection(
+    path: Path, choices: list[Choice], chapters: set[int], keep_chapters: set[int]
+) -> None:
+    """今回処理した章（chapters、0 始まり）を choices で置き換え、keep_chapters に無い章を落とす。
+
+    枠が 1 つも無い章は choices に現れないので、chapters にある章は空のリストにする。
+    """
     data = _read_json(path)
-    new: dict[str, list[dict]] = {}
+    new: dict[str, list[dict]] = {str(ch): [] for ch in chapters}
     for c in choices:
         new.setdefault(str(c.chapter), []).append(c.to_dict())
     data.update(new)
@@ -542,7 +547,7 @@ def write_missing(path: Path, choices: list[Choice], scenes: dict[int, list[Scen
         if sc is None or (c.kind == "ambient" and sc.ambient_query is None):
             continue  # 意図した無音
         lines.append("\t".join([
-            str(c.chapter), str(c.scene), str(sc.start_para), c.kind,
+            str(c.chapter + 1), str(c.scene), str(sc.start_para), c.kind,
             _one_line(sc.description), _one_line(c.query), c.reason,
         ]))
     _write_text(path, "\n".join(lines) + "\n")

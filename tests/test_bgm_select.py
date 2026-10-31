@@ -330,6 +330,7 @@ def test_write_gate_tsv_sanitizes_tabs_and_newlines(tmp_path):
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert len(lines[1].split("\t")) == len(lines[0].split("\t"))
+    assert lines[1].split("\t")[0] == "1"  # 人が読む表なので章は 1 始まり
 
 
 # ---------- window_starts ----------
@@ -486,14 +487,22 @@ def choice(chapter=0, scene_i=0, kind="ambient", sound=None, reason=None):
 
 def test_selection_roundtrip_replaces_chapter_and_drops_others(tmp_path):
     path = tmp_path / "selection.json"
-    write_selection(path, [choice(0, sound=snd(id=1)), choice(1, sound=snd(id=2))], {0, 1})
+    write_selection(path, [choice(0, sound=snd(id=1)), choice(1, sound=snd(id=2))], {0, 1}, {0, 1})
     assert [c.sound.id for c in load_selection(path)] == [1, 2]
     # 章 1 だけ作り直し、章 0 は残す
-    write_selection(path, [choice(1, sound=snd(id=9))], {0, 1})
+    write_selection(path, [choice(1, sound=snd(id=9))], {1}, {0, 1})
     assert [(c.chapter, c.sound.id) for c in load_selection(path)] == [(0, 1), (1, 9)]
     # 小説から章 0 が消えた
-    write_selection(path, [choice(1, sound=snd(id=9))], {1})
+    write_selection(path, [choice(1, sound=snd(id=9))], {1}, {1})
     assert [(c.chapter, c.sound.id) for c in load_selection(path)] == [(1, 9)]
+
+
+def test_selection_processed_chapter_without_slots_clears_old_choices(tmp_path):
+    path = tmp_path / "selection.json"
+    write_selection(path, [choice(0, sound=snd(id=1)), choice(1, sound=snd(id=2))], {0, 1}, {0, 1})
+    # 章 0 を処理したが枠が無かった（choices に章 0 が無い）→ 古い音は残さない
+    write_selection(path, [], {0}, {0, 1})
+    assert [(c.chapter, c.sound.id) for c in load_selection(path)] == [(1, 2)]
 
 
 def test_load_selection_missing_file(tmp_path):
@@ -512,7 +521,7 @@ def test_write_missing_skips_intentional_silence(tmp_path):
     lines = path.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "chapter\tscene\tstart_para\tkind\tdescription\tquery\treason"
     assert len(lines) == 3  # 選べた intro は出ない
-    assert lines[1].split("\t") == ["0", "0", "0", "ambient", "scene 0", "q", "no_result"]
+    assert lines[1].split("\t") == ["1", "0", "0", "ambient", "scene 0", "q", "no_result"]
     assert lines[2].split("\t")[3:] == ["bridge", "scene 1", "q", "all_rejected"]
     # ambient_query が None の場面の ambient は（万一 choice があっても）出さない
     write_missing(path, [choice(0, 1, "ambient", reason="no_result")], scenes)
