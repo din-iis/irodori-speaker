@@ -545,7 +545,7 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml \
 
 ```bash
 git pull
-uv sync --frozen --extra tts --extra cu128 --extra webui
+uv sync --frozen --extra tts --extra cu128 --extra webui --extra bgm
 ```
 
 新しい設定はすべて既定値で動くので、`config.yaml` は書き換えなくて構いません。試験用に、見出しと区切り行を含む短い小説を作ります。
@@ -604,7 +604,13 @@ uv run --no-sync python -m irodori_speaker export novel.txt -c config.yaml  # ou
 - WebUI の「書き出し」ボタンを使うと、Mac のブラウザに直接ダウンロードできます。AirDrop で iPhone に送り、Apple Books で開きます。
 - 章の一覧が見出しどおりに並ぶこと、章の頭に飛べること、続きから再生できることを確かめます。サイズは 64k のモノラルで 1 時間あたり約 30 MB が目安です。
 - MP3 も試すなら `--format mp3` を付けます。`export/chapters/` に章ごとの MP3 ができます。
-- `bgm` も GPU マシンではまだ通していません。試すなら `bgm` の後に `export novel.txt -c config.yaml --bgm --bitrate 96k` を実行します。
+- `bgm` も GPU マシンではまだ通していません。WebUI で試すときは、Freesound のキーのファイル（「BGM を付ける」節の前提）を用意してから、次の順に確かめます。
+  1. 「小説生成」タブで小説を選び、章の範囲に `1` と入れて「BGM を付ける」を押します。状態欄に「TTS を解放しました」と BGM の進捗が出ることを確かめます。
+  2. 終わったら、章ごとの MP3 の一覧から 1 章目を再生します。場面と環境音が合っているか、音楽の出入りが滑らかか、環境音と音楽が声の邪魔にならない音量かを聴きます。章の範囲を指定したときは、通しの MP3 は作られません。
+  3. キーのファイルを一時的に別名にして押すと、作り方の案内が出て止まることも確かめます。
+  4. 章の範囲を空にして全章に BGM を付け、通しの MP3 が再生できることを確かめます。続けて「BGM 付き」にチェックを入れて「書き出し」を押し、`<book>_bgm.m4b` が Books で開けることを確かめます。
+  
+  CLI なら `bgm novel.txt -c config.yaml` の後に `export novel.txt -c config.yaml --bgm --bitrate 96k` です。
 
 ### 確かめた結果として残すこと
 
@@ -612,6 +618,7 @@ uv run --no-sync python -m irodori_speaker export novel.txt -c config.yaml  # ou
 - `check` の印のうち、聴いて本当に悪かった文と、問題なかった文の例（`tail` などの定数を実データで調整するため）。
 - `--asr` と `--lora-adapter` がエラーなく動いたか。エラーが出たら、その全文。
 - Apple Books で章が並んだか。
+- BGM の場面と音が合っていたか、環境音と音楽の音量が声に対して大きすぎたり小さすぎたりしなかったか。
 
 ## テスト
 
