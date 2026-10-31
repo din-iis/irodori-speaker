@@ -37,7 +37,7 @@ uv run --no-sync python -m irodori_speaker export novel.txt -c config.yaml     #
 uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> --checkpoint <B>
 ```
 
-サブコマンドは `script` / `synth` / `run` / `bgm` / `check` / `export`。`script` は `--chapters --no-emotion --reannotate --llm-model --think`、`synth` は `--chapters --force --voice --checkpoint --lora-adapter`、`run` はその両方を取る。`bgm` は `--chapters --replan --llm-model --think`（`run` には入れない）。`check` は `--chapters --asr --voice --checkpoint --lora-adapter`、`export` は `--format --bitrate --bgm`（常に全章。`--chapters` は無い）。設計は `docs/superpowers/specs/2026-10-31-listening-features-design.md`（ただし自動の題は `AUTO_TITLES` ではなく `_split_chapters_marked` の旗で判定する）。lint / formatter の設定は無い。`uv.lock` の `irodori-tts` を更新するときは `uv lock --upgrade-package irodori-tts`。
+サブコマンドは `script` / `synth` / `run` / `bgm` / `check` / `export`。`script` は `--chapters --no-emotion --reannotate --llm-model --think`、`synth` は `--chapters --force --voice --checkpoint --lora-adapter`、`run` はその両方を取る。`bgm` は `--chapters --replan --llm-model --think --ambient-db --music-db`（`run` には入れない）。`check` は `--chapters --asr --voice --checkpoint --lora-adapter`、`export` は `--format --bitrate --bgm`（常に全章。`--chapters` は無い）。設計は `docs/superpowers/specs/2026-10-31-listening-features-design.md`（ただし自動の題は `AUTO_TITLES` ではなく `_split_chapters_marked` の旗で判定する）。lint / formatter の設定は無い。`uv.lock` の `irodori-tts` を更新するときは `uv lock --upgrade-package irodori-tts`。
 
 ## Architecture
 
@@ -72,7 +72,7 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> 
 - 「台本を作る」「一括実行」の台本部分と「LLM で絵文字を付ける」は、LLM を動かす前に TTS の runtime を GPU から解放する（8GB で両方を載せない）。TTS は次の生成で読み直される。GPU を使う操作は `concurrency_id="gpu"`（上限 1）で直列にする。
 - 「音声にする」は表の編集を `script.tsv` に保存してから `load_book` → `check_vram` → `synthesize_book` を回す。表が空なら `script.tsv` をそのまま使い、無ければ案内して止まる。表で編集できるのは `text` と `seed` 列だけで、他の列は読み込み時の値を使う（`rows_from_dataframe`。`break` 行の `text` は常に空）。「一括実行」の合成は、直前に作った `script.tsv` をそのまま使う。
 - 表の行を選ぶ（`select_row`）とその文のキャッシュ WAV を再生する。選択は Engine を書き換えない（`Engine.peek` と独立した `Synthesizer` でキーを引く。合成中の共有インスタンスの `segments_dir` 等を変えないため）。小説の切り替えで選択は消える。「取り直し」（GPU）は seed を 1 増やしてその文だけ合成し、表の `seed` を更新する（`script.tsv` は「音声にする」が保存する）。「チェック」は `check_book`（ASR なし、GPU なし）。「書き出し」は `build_export`（GPU のキューに入らない。書き出し中に章が書き換わると `build_export` が出力を捨てて止まる）。
-- 「BGM を付ける」（GPU）は `release_tts` → `stream_progress` で `build_bgm`（章の範囲と画面の LLM 設定を渡す。`--replan`・停止・`exclude.txt` の編集は CLI と手書きのまま）。例外は `bgm_error_message`（`KeyMissing` は作り方、`DailyLimit` は翌日の案内、`ImportError` は `cli.BGM_IMPORT_MISSING`）で `gr.Error` にする。結果は `bgm_summary` と通し MP3・章 MP3。
+- 「BGM を付ける」（GPU）は `release_tts` → `stream_progress` で `build_bgm`（章の範囲と画面の LLM 設定、環境音・音楽の音量スライダーを渡す。`--replan`・停止・`exclude.txt` の編集は CLI と手書きのまま）。例外は `bgm_error_message`（`KeyMissing` は作り方、`DailyLimit` は翌日の案内、`ImportError` は `cli.BGM_IMPORT_MISSING`）で `gr.Error` にする。結果は `bgm_summary` と通し MP3・章 MP3。
 - 試聴の「生成」「総当たり生成」は、本文を `split_preview_text`（小説生成と同じ `split.max_chars` の分割）で文に分け、文ごとに `generate_once` を呼んで `join_audio` で `silence` の無音を挟んで結合する（長い文は後半で声が崩れるため）。
 - 「停止」は `should_stop` のフラグを立てるだけで、現在の文が終わり次第止まる。文ごとのキャッシュがあるので、再実行で続きから進む。
 - 「声を追加」は `voices/<ID><元の拡張子>` にコピーする。既存の ID は上書きせず拒否する。
@@ -87,7 +87,8 @@ uv run --no-sync python scripts/caption_test.py -c config.yaml --checkpoint <A> 
 3. キャッシュ（`bgm/cache/`）: `scenes.jsonl`（場面）・`search.json`（検索語と条件ごと。上限で止まった後の再実行で API を呼ばない）・`gate.jsonl`（ふるい分け）・`scores.json`（CLAP の点）。`--replan` は `scenes.jsonl` だけ消す。試聴 MP3 は本をまたぐ共有キャッシュ `<output_dir>/.freesound/previews/<ID>.mp3`（`freesound.cached_preview`、あればダウンロードしない。採点用も重ね合わせ用も同じ。消さないが、CLAP の採点や `decode` で読めなかったファイルは消して次の実行で取り直す）。章の MP3 は `<mp3>.sig`（朗読の署名・場面・選んだ音の ID・`bgm` 設定の `mix_signature`）が一致し、`<mp3>.sounds.json`（その MP3 で実際に使った音）があれば重ね直さない。重ね直しに失敗した章は MP3・`.sig`・`.sounds.json` を消す（CREDITS.txt と食い違う古い MP3 を残さない）。通しは `--chapters` なしで全章の MP3 が揃ったときだけ作り、それ以外と失敗時は古い通しを消す。`--chapters` で一部だけ処理しても `selection.json` / `scenes.json` の他の章は残す。
 4. 1 日の上限（`DailyLimit`）は捕まえずに上げ、MP3 は書かない（`cli` は終了コード 1）。`KeyMissing` / `ImportError` は終了コード 2、`ValueError` / `RuntimeError` は 1。
 5. キーは `~/.config/irodori-speaker/secrets.env`（`bgm.secrets_file`）の `FREESOUND_API_KEY=` 行だけに置く。環境変数に置かない。`Authorization` ヘッダーで API ホストにだけ送り、URL・例外・ログ・キャッシュに含めない（試聴 MP3 の取得には付けない）。**実装・テストはこの実ファイルを読まない**（テストは `tmp_path` に偽のファイルを作る）。
-6. `exclude.txt`（手で書く Freesound の ID、`bgm` は読むだけ）以外の `scenes.json` / `selection.json` は派生ファイルで、手で直さない。出力は私的な利用に限る（小説の著作権と Freesound のライセンス）。
+6. 音量（`bgm_mix.render`）: 声と素材を `loudness_db`（BS.1770 の K 特性を 400 ms ブロックの rfft パワーにかける簡略版。絶対ゲート -70・相対ゲート -10、オフセット -0.691）で測り、素材を「声の音量 + `ambient_db` / `music_db`」に合わせる。素材はステレオ（L+R の和）、モノラルの声は両チャンネルに入るので +3.01 dB して揃える。規則を変えたら `MIX_RULE` を上げる（今は 2）。`ambient_db` / `music_db` は CLI の `--ambient-db` / `--music-db` と WebUI のスライダー（範囲は `bgm_slider_range` で config の値を含む）で、config.yaml を書き換えずにその実行だけ上書きできる（ユーザーの config.yaml は直しにくいので、調整値は既定値の変更より上書きの口を用意する）。
+7. `exclude.txt`（手で書く Freesound の ID、`bgm` は読むだけ）以外の `scenes.json` / `selection.json` は派生ファイルで、手で直さない。出力は私的な利用に限る（小説の著作権と Freesound のライセンス）。
 
 ## 注意点
 
