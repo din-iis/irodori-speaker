@@ -345,3 +345,21 @@ def test_analyze_file_の無音_WAV_は_silent_になる(tmp_path):
     q = tmp_path / "v.wav"
     sf.write(q, _sine(1.0), SR)
     assert "silent" not in check.flags_for(_row(stats=check.analyze_file(q), z=0.0), 3.0, 0.3, set())
+
+
+def test_transcribe_は_30_秒を超える音声も扱えるようにチャンク長を渡す(tmp_path, monkeypatch):
+    import sys
+
+    p = tmp_path / "a.wav"
+    sf.write(p, np.zeros(100, dtype=np.float32), SR)
+    seen: dict = {}
+
+    def fake_pipeline(*a, **k):
+        seen.update(k)
+        return lambda inputs, **kw: [{"text": "x"} for _ in inputs]
+
+    fake = types.ModuleType("transformers")
+    fake.pipeline = fake_pipeline
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+    check.transcribe([p], "m", "cpu")
+    assert seen.get("chunk_length_s") == 30

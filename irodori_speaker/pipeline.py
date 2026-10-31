@@ -434,8 +434,8 @@ def check_book(
         if c.chapter not in times:
             times[c.chapter] = check.load_times_json(_chapter_path(out_dir, c.chapter, titles))
         c.offset = check.offset_for(times[c.chapter], c.para, c.seg)
-    if asr:
-        targets = [c for c in checked if c.stats is not None]
+    targets = [c for c in checked if c.stats is not None] if asr else []
+    if targets:  # 認識する WAV が無ければモデルを読み込まない（missing のレポートだけ出す）
         transcribe = transcriber or check.transcribe_with(cfg.check)
         texts = transcribe([synth.segments_dir / f"{c.key}.wav" for c in targets])
         for c, hyp in zip(targets, texts):

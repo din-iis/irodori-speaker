@@ -412,3 +412,16 @@ def test_check_は読み辞書を当てた本文で_chars_と_cer_を出す(tmp_
     assert first.chars == 2  # 「一」ではなく「いち」の文字数
     assert first.text == "一"  # check.tsv の text は原文のまま
     assert first.cer == 0.0 and "cer" not in first.flags
+
+
+def test_check_book_は認識する_WAV_が無ければ_ASR_を呼ばない(tmp_path):
+    specs = _normal_specs(2)
+    cfg, out, _ = _make_check_book(tmp_path, specs)
+    for wav in (out / "segments").glob("*.wav"):
+        wav.unlink()
+
+    def boom(paths):
+        raise AssertionError("ASR を呼んではいけない")
+
+    res = pipeline.check_book(cfg, out, asr=True, transcriber=boom)
+    assert all(r.flags == ["missing"] for r in res.rows)

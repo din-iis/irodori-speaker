@@ -242,7 +242,8 @@ def transcribe(paths: list[Path], model: str, device: str, batch_size: int = 8) 
     """音声を文字に起こす。transformers は ここでだけ import する（Mac には無い）。"""
     from transformers import pipeline
 
-    asr = pipeline("automatic-speech-recognition", model=model, device=device)
+    # 30 秒を超える文（sampling.max_seconds を上げた場合）も扱えるよう、チャンクに分けて認識する
+    asr = pipeline("automatic-speech-recognition", model=model, device=device, chunk_length_s=30)
     try:
         texts: list[str] = []
         for i in range(0, len(paths), batch_size):  # 全件を float32 で持たないよう、バッチごとに読んで捨てる
