@@ -22,6 +22,7 @@ from .config import EMOTIONS, Config, load_config
 from .pipeline import (
     TSV_FIELDS,
     book_dir,
+    build_export,
     build_script,
     load_book,
     parse_chapter_range,
@@ -740,6 +741,17 @@ def build_app(cfg: Config):
         handler.__name__ = f"run_{mode}"
         return handler
 
+    def export_book(novel_file, novel_text, fmt, with_bgm):
+        try:
+            novel = _novel_path(novel_file, novel_text)
+            result = build_export(
+                cfg, book_dir(cfg, novel), source="bgm" if with_bgm else "narration", fmt=fmt
+            )
+        except (ValueError, RuntimeError) as e:
+            raise fail("書き出しに失敗しました", e) from e
+        note = "（変更なし）" if result.skipped else ""
+        return str(result.path), f"✅ 書き出しました{note}: {result.path}"
+
     def stop_run():
         stop_flag.set()
         gr.Info("停止を要求しました。現在の文の合成が終わり次第止まります")
@@ -862,6 +874,12 @@ def build_app(cfg: Config):
             chapter_files = gr.Files(label="章ごとの WAV")
             full_audio = gr.Audio(type="filepath", label="全体の WAV")
 
+            with gr.Row():
+                export_format = gr.Dropdown(["m4b", "mp3"], value=cfg.export.format, label="書き出し形式")
+                export_bgm = gr.Checkbox(label="BGM 付き（bgm の MP3 から）")
+                export_btn = gr.Button("書き出し")
+            export_file = gr.File(label="書き出したファイル")
+
             novel_inputs = [
                 novel_file, novel_text, chapters, no_emotion, reannotate, force,
                 *tts_inputs, *llm_inputs, table, script_rows,
@@ -870,6 +888,9 @@ def build_app(cfg: Config):
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):
                 btn.click(make_handler(mode), novel_inputs, novel_outputs, **gpu)
             stop_btn.click(stop_run, None, None)
+            export_btn.click(
+                export_book, [novel_file, novel_text, export_format, export_bgm], [export_file, novel_status]
+            )
             save_btn.click(save_script, [table, script_rows, novel_file, novel_text], [script_rows, novel_status])
             for trigger in (novel_file.change, novel_text.submit, novel_text.blur):
                 trigger(

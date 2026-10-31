@@ -624,3 +624,92 @@ def _build_bgm(
     missing_tsv = bgm_dir / "missing.tsv"
     missing = max(0, len(missing_tsv.read_text(encoding="utf-8").splitlines()) - 1) if missing_tsv.exists() else 0
     return BgmResult(chapter_files, full, missing)
+
+
+@dataclass
+class ExportResult:
+    path: Path  # 通しの出力（m4b、または mp3 の通し）
+    chapter_files: list[Path]  # mp3 のときの章ごとのファイル（m4b は空）
+    skipped: bool  # 署名が一致して再エンコードしなかった
+
+
+def build_export(
+    cfg: Config,
+    out_dir: Path,
+    *,
+    source: str = "narration",
+    fmt: str | None = None,
+    bitrate: str | None = None,
+    progress: Progress | None = None,
+) -> ExportResult:
+    """合成済みの章（source="bgm" なら BGM 付きの章 MP3）を、聴く形式（m4b / mp3）に書き出す。"""
+    from . import audio_io, export
+
+    fmt = fmt or cfg.export.format
+    bitrate = bitrate or cfg.export.bitrate
+    if fmt not in export.FORMATS:
+        raise ValueError(f"形式は {' / '.join(export.FORMATS)} のどちらかにしてください: {fmt}")
+    if source not in export.SOURCES:
+        raise ValueError(f"source は {' / '.join(export.SOURCES)} のどちらかにしてください: {source}")
+    titles, rows = load_book(out_dir)
+    inputs = []
+    for idx in sorted(titles):
+        wav = _chapter_path(out_dir, idx, titles)
+        mp3 = out_dir / "bgm" / "chapters" / f"{wav.stem}.mp3" if source == "bgm" else None
+        inputs.append(export.ExportInput(idx, titles[idx], wav, mp3))
+    chapters = export.collect_chapters(inputs, rows, source=source)
+
+    book = cfg.export.title or out_dir.name
+    channels = 2 if source == "bgm" else 1
+    full, chapter_dir = export.export_paths(out_dir, source=source, fmt=fmt)
+    chapter_paths = [export.chapter_mp3_path(chapter_dir, c) for c in chapters] if chapter_dir else []
+    signature = export.export_signature(
+        chapters, source=source, fmt=fmt, bitrate=bitrate, channels=channels, book=book
+    )
+    sig_file = _sig_path(full)
+    if (
+        full.exists()
+        and all(p.exists() for p in chapter_paths)
+        and sig_file.exists()
+        and sig_file.read_text(encoding="utf-8").strip() == signature
+    ):
+        return ExportResult(full, chapter_paths, True)
+
+    steps = len(chapters) + 1 if fmt == "mp3" else 1
+    done = 0
+
+    def tick(msg: str) -> None:
+        nonlocal done
+        done += 1
+        if progress:
+            progress(done, steps, msg)
+
+    if progress:
+        progress(0, steps, "書き出し中")
+    sig_file.unlink(missing_ok=True)
+    try:
+        if fmt == "m4b":
+            audio_io.write_m4b(
+                [c.src for c in chapters], export.ffmetadata(book, chapters), full, bitrate, channels
+            )
+            tick("書き出し完了")
+        else:
+            for n, (c, path) in enumerate(zip(chapters, chapter_paths), start=1):
+                title = export.chapter_title(c.idx, c.title)
+                audio_io.encode_file(
+                    c.src, path,
+                    [
+                        "-c:a", "libmp3lame", "-b:a", bitrate, "-ac", str(channels),
+                        "-metadata", f"title={title}", "-metadata", f"album={book}",
+                        "-metadata", f"track={c.idx + 1}", "-f", "mp3",
+                    ],
+                )
+                tick(f"章 {n}/{len(chapters)}")
+            audio_io.concat_mp3(chapter_paths, full)
+            tick("通しを連結")
+        sig_file.write_text(signature, encoding="utf-8")
+    except BaseException:
+        full.unlink(missing_ok=True)
+        sig_file.unlink(missing_ok=True)
+        raise
+    return ExportResult(full, chapter_paths, False)

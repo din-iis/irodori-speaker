@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -100,6 +101,13 @@ class BgmConfig:
 
 
 @dataclass
+class ExportConfig:
+    format: str = "m4b"  # m4b | mp3
+    bitrate: str = "64k"
+    title: str | None = None  # null なら小説ファイル名（stem）
+
+
+@dataclass
 class Config:
     checkpoint: str = "Aratako/Irodori-TTS-v4.1-Small"
     codec_repo: str = "Aratako/Semantic-DACVAE-Japanese-32dim"
@@ -122,6 +130,7 @@ class Config:
     split: SplitConfig = field(default_factory=SplitConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     bgm: BgmConfig = field(default_factory=BgmConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
     output_dir: str = "out"
 
 
@@ -131,6 +140,7 @@ _SECTIONS = {
     "split": SplitConfig,
     "silence": SilenceConfig,
     "bgm": BgmConfig,
+    "export": ExportConfig,
 }
 
 
@@ -160,6 +170,11 @@ def _build(cls, data: dict[str, Any]):
                 raise ValueError(
                     f"Config: bgm.{name} は music_fade_in と music_fade_out の合計（{fades}）以上にしてください"
                 )
+    if cls is ExportConfig:
+        if kwargs.get("format", "m4b") not in ("m4b", "mp3"):
+            raise ValueError("Config: export.format は m4b か mp3 にしてください")
+        if not re.fullmatch(r"\d+k", str(kwargs.get("bitrate", "64k"))):
+            raise ValueError("Config: export.bitrate は 64k のような「数字 + k」にしてください")
     if cls is Config:
         for key, sub in _SECTIONS.items():
             if key in kwargs:

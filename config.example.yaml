@@ -78,4 +78,9 @@ bgm:
   ambient_crossfade: 4.0
   mp3_bitrate: 192k
 
+export:
+  format: m4b               # m4b（章マーカー付き AAC。Apple Books 向け）| mp3
+  bitrate: 64k              # 朗読はモノラル 64k で十分。BGM 付きは 96k 以上を推奨
+  title: null               # 本の題名。null なら小説ファイル名（stem）
+
 output_dir: out
