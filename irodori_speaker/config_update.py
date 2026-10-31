@@ -148,6 +148,8 @@ def _find_section(lines: list[str], key: str) -> tuple[int, int]:
                 continue
             if lines[j][0] in " \t":
                 last = j
+            elif lines[j].startswith("#"):
+                continue  # インデントの無いコメントは節を終わらせない
             else:
                 break
         return i, last

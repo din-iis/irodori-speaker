@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -317,9 +319,16 @@ def _run_config(args) -> int:
         return 0
     bak = path.with_name(path.name + ".bak")
     shutil.copy2(path, bak)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    tmp.replace(path)
+    # 一時ファイルは 0600 で作られるので、元のアクセス権を写してから置き換える
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(new_text)
+        shutil.copymode(path, tmp_name)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     print("足したキー: " + "、".join(f"`{k}`" for k in added))
     print(f"元の設定は {bak} に残しました")
     return 0

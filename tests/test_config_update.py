@@ -301,3 +301,37 @@ def test_cli_config_help_is_japanese(capsys):
     assert "--update" in out and "--dry-run" in out and "--example" in out
     assert re.search(r"[ぁ-んァ-ン一-龥]", out.split("options:")[-1].split("optional arguments:")[-1])
     assert "novel" not in out
+
+
+def test_unindented_comment_inside_section_does_not_end_it():
+    text = (
+        "silence:\n"
+        "# メモ\n"
+        "    sentence: 0.25\n"
+        "    paragraph: 0.6\n"
+        "output_dir: out\n"
+    )
+    new, added, _ = update_config_text(text, example_text())
+    assert "silence.title" in added
+    lines = new.splitlines()
+    i = lines.index("    paragraph: 0.6")
+    assert lines[i + 1].startswith("    chapter: 1.0")
+    assert "\n  title: 1.0" not in new
+    assert "# メモ" in new
+    assert asdict(load_text(new)) == asdict(Config())
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o644])
+def test_cli_update_keeps_file_permissions(tmp_path, mode):
+    import os
+
+    path = write_config(tmp_path, drop_section(example_text(), "export"))
+    path.chmod(mode)
+    old = os.umask(0o022)
+    try:
+        assert main(["config", "--update", "-c", str(path)]) == 0
+    finally:
+        os.umask(old)
+    assert "export:" in path.read_text(encoding="utf-8")
+    assert path.stat().st_mode & 0o777 == mode
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["config.yaml", "config.yaml.bak"]
