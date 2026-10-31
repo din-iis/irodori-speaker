@@ -428,7 +428,18 @@ Mac のブラウザで `http://<GPU マシンの IP>:7860` を開きます（`--
 
 ## 設定
 
-`config.example.yaml` をコピーして `config.yaml` を作ります（`config.yaml` は git に入れません）。主なキーは次のとおりです。
+`config.example.yaml` をコピーして `config.yaml` を作ります（`config.yaml` は git に入れません）。
+
+**設定を足すとき（`config --update`）**: 新しい版で `config.example.yaml` に設定が増えたら、次で `config.yaml` に足りないキーだけを、例のコメントごと書き足せます。書き換えた値・コメント・並び順はそのまま残ります。
+
+```bash
+uv run python -m irodori_speaker config --update -c config.yaml             # 書き足す（元は config.yaml.bak に残す）
+uv run python -m irodori_speaker config --update -c config.yaml --dry-run   # 足すキーを表示するだけ
+```
+
+例の値は組み込みの既定値と同じなので、足さなくても動きは変わりません（書き足した後の設定が前と同じ値になることを確かめてから書き込みます）。例の値が既定値と違うキー（今は `voice`）は足さず、「手で確かめてください」と表示します。`# chapter_regex` のようにコメントアウトされた行も足しません。`--example` で例のファイルを変えられます。
+
+主なキーは次のとおりです。
 
 | キー | 既定値 | 内容 |
 |---|---|---|

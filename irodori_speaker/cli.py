@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
 from tqdm import tqdm
 
 from .config import Config, load_config
+from .config_update import update_config_text
 from .lora import normalize_lora
 from .pipeline import (
     BookResult,
@@ -20,6 +25,8 @@ from .pipeline import (
     synthesize_book,
 )
 from .text_splitter import build_chapters, read_text
+
+EXAMPLE_CONFIG = Path(__file__).resolve().parents[1] / "config.example.yaml"
 
 TTS_MISSING = (
     "音声合成には torch と irodori_tts が必要です。"
@@ -290,6 +297,45 @@ def _run_export(args, cfg: Config, out_dir: Path) -> int:
     return 0
 
 
+def _run_config(args) -> int:
+    path: Path = args.config
+    for label, p in (("設定ファイル", path), ("例のファイル", args.example)):
+        if not p.is_file():
+            print(f"{label}が見つかりません: {p}", file=sys.stderr)
+            return 1
+    try:
+        with open(path, encoding="utf-8", newline="") as f:  # CRLF の設定も改行を変えずに読む
+            text = f.read()
+        new_text, added, manual = update_config_text(text, args.example.read_text(encoding="utf-8"))
+    except ValueError as e:
+        print(f"エラー: {e}", file=sys.stderr)
+        return 1
+    for key, value in manual:
+        print(f"手で確かめてください: {key}（例の値 {value}）")
+    if not added:
+        print("足りない設定はありません")
+        return 0
+    if args.dry_run:
+        print("足すキー（--dry-run のためファイルは書き換えていません）: " + "、".join(f"`{k}`" for k in added))
+        return 0
+    path = path.resolve()  # シンボリックリンクならリンク先を書き換える（リンクを普通のファイルにしない）
+    bak = args.config.with_name(args.config.name + ".bak")
+    shutil.copy2(path, bak)
+    # 一時ファイルは 0600 で作られるので、元のアクセス権を写してから置き換える
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(new_text)
+        shutil.copymode(path, tmp_name)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    print("足したキー: " + "、".join(f"`{k}`" for k in added))
+    print(f"元の設定は {bak} に残しました")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="irodori_speaker", description="小説を Irodori-TTS で読み上げる")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -344,7 +390,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bitrate", help="ビットレート 例: 64k（config の export.bitrate を上書き）")
     p.add_argument("--bgm", action="store_true", help="bgm の章 MP3（BGM 付き）から書き出す")
 
+    p = sub.add_parser("config", help="config.yaml に足りない設定を、例のファイルのコメントごと書き足す")
+    p.add_argument("--update", action="store_true", required=True, help="config.example.yaml にあって config.yaml に無いキーを書き足す（既存の値・コメントはそのまま）")
+    p.add_argument("-c", "--config", type=Path, default=Path("config.yaml"), help="書き足す設定 YAML（既定: config.yaml）")
+    p.add_argument("--example", type=Path, default=EXAMPLE_CONFIG, help="書き足す元の例のファイル（既定: リポジトリの config.example.yaml）")
+    p.add_argument("--dry-run", action="store_true", help="足すキーを表示するだけで、ファイルは書き換えない")
+
     args = ap.parse_args(argv)
+    if args.command == "config":
+        return _run_config(args)
     cfg = load_config(args.config)
     out_dir = book_dir(cfg, args.novel)
 
