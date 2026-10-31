@@ -304,7 +304,8 @@ def _run_config(args) -> int:
             print(f"{label}が見つかりません: {p}", file=sys.stderr)
             return 1
     try:
-        text = path.read_text(encoding="utf-8")
+        with open(path, encoding="utf-8", newline="") as f:  # CRLF の設定も改行を変えずに読む
+            text = f.read()
         new_text, added, manual = update_config_text(text, args.example.read_text(encoding="utf-8"))
     except ValueError as e:
         print(f"エラー: {e}", file=sys.stderr)

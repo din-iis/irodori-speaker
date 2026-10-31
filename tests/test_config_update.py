@@ -354,3 +354,13 @@ def test_シンボリックリンクの設定はリンク先を書き換えて�
     assert main(["config", "--update", "-c", str(link)]) == 0
     assert link.is_symlink()
     assert "export:" in real.read_text(encoding="utf-8")
+
+
+def test_CRLF_の設定は既存の行の改行を保ったまま足す(tmp_path):
+    path = tmp_path / "config.yaml"
+    body = drop_section(example_text(), "export").replace("\n", "\r\n")
+    path.write_bytes(body.encode("utf-8"))
+    assert main(["config", "--update", "-c", str(path)]) == 0
+    raw = path.read_bytes().decode("utf-8")
+    assert raw.startswith(body)
+    assert "\n" not in raw.replace("\r\n", "")
