@@ -391,3 +391,24 @@ def test_cli_check_は_lora_adapter_を_cfg_に反映する(tmp_path, monkeypatc
     cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none", "--lora-adapter", "/x/ad"])
     cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none", "--lora-adapter", "none"])
     assert seen == ["/x/ad", None]
+
+
+# ---------- 読み辞書を当てた本文で指標を出す ----
+
+
+def test_check_は読み辞書を当てた本文で_chars_と_cer_を出す(tmp_path, monkeypatch):
+    specs = [(0, 0, i, "narration", t, None, "") for i, t in enumerate(["一", "二本", "三人目", "四つ目です"])]
+    cfg, out, _ = _make_check_book(tmp_path, specs)
+    (out / "readings.yaml").write_text("一: いち\n", encoding="utf-8")
+    from irodori_speaker.readings import load_readings
+
+    synth = _fake_runtime_synth(monkeypatch, cfg, out, readings=load_readings(cfg, out))
+    titles, rows = pipeline.load_book(out)
+    pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    res = pipeline.check_book(
+        cfg, out, asr=True, transcriber=lambda paths: ["いち", "二本", "三人目", "四つ目です"]
+    )
+    first = res.rows[0]
+    assert first.chars == 2  # 「一」ではなく「いち」の文字数
+    assert first.text == "一"  # check.tsv の text は原文のまま
+    assert first.cer == 0.0 and "cer" not in first.flags

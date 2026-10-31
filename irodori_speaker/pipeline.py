@@ -391,7 +391,7 @@ def check_book(
     transcriber: Callable[[list[Path]], list[str]] | None = None,
 ) -> CheckResult:
     """合成済みの文（segments/）を調べて、怪しい文に印を付けた check.tsv を書く。GPU は ASR のときだけ使う。"""
-    from .readings import load_readings
+    from .readings import apply_readings, load_readings
     from .synth import Synthesizer
     from .voices import is_no_ref, resolve_voice
 
@@ -405,9 +405,10 @@ def check_book(
     if not cfg.voice:
         raise ValueError("config の voice か --voice で声を指定してください")
     voice_paths = [] if is_no_ref(cfg.voice) else resolve_voice(Path(cfg.voices_dir), cfg.voice)
+    readings = load_readings(cfg, out_dir)
     synth = Synthesizer(
         cfg, out_dir / "segments", voice_paths, Path(cfg.output_dir) / ".voices",
-        readings=load_readings(cfg, out_dir),  # LoRA は cfg.lora_adapter から Synthesizer が読む
+        readings=readings,  # LoRA は cfg.lora_adapter から Synthesizer が読む
     )
     warned = check.read_warned_keys(out_dir / "warnings.log")
 
@@ -417,7 +418,7 @@ def check_book(
         checked.append(
             check.CheckRow(
                 chapter=int(r["chapter"]), para=int(r["para"]), seg=int(r["seg"]), key=key,
-                text=r["text"], chars=check.count_chars(r["text"]),
+                text=r["text"], chars=check.count_chars(apply_readings(r["text"], readings)),
                 stats=check.analyze_file(synth.segments_dir / f"{key}.wav"), z=None, offset=None,
             )
         )
@@ -439,7 +440,8 @@ def check_book(
         texts = transcribe([synth.segments_dir / f"{c.key}.wav" for c in targets])
         for c, hyp in zip(targets, texts):
             c.transcript = hyp
-            ref = check.normalize_for_cer(check.strip_emoji(check.tts_text(c.text)))
+            spoken = apply_readings(c.text, readings)  # モデルが読んだ本文を参照にする（text 列は原文のまま）
+            ref = check.normalize_for_cer(check.strip_emoji(check.tts_text(spoken)))
             c.cer = check.cer(ref, check.normalize_for_cer(hyp))
     for c in checked:
         c.flags = check.flags_for(c, cfg.check.z_threshold, cfg.check.cer_threshold, warned)

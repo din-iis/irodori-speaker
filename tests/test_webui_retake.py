@@ -353,3 +353,45 @@ def test_run_check_は_lora_入りの_cfg_を_check_book_に渡す(monkeypatch, 
     monkeypatch.setattr(webui, "check_book", fake)
     fns["run_check"](None, str(novel), "", *TTS, dataframe_rows(rows), rows, lora_adapter="/x/ad")
     assert seen == ["/x/ad"]
+
+
+# ---- 小説の切り替え・台本の作り直しで行の選択を消す ----
+
+NO_UPDATE = {"__type__": "update"}
+
+
+def test_小説を切り替えると選択と音声が消える(monkeypatch, tmp_path):
+    fns = _handlers(monkeypatch, tmp_path)
+    cfg, novel_a, _out = _book(tmp_path, [_row(0, "あ")])
+    other = tmp_path / "b.txt"
+    other.write_text("x", encoding="utf-8")
+    table, rows, status, loaded, sel, audio = fns["show_script_clearing"](None, str(novel_a), None)
+    assert (sel, audio) == (None, None) and loaded == str(novel_a)
+    # 別の小説に切り替えたとき（script.tsv が無くても）選択を消す
+    *_, sel, audio = fns["show_script_clearing"](None, str(other), loaded)
+    assert (sel, audio) == (None, None)
+
+
+def test_同じ小説の再表示では選択を保つ(monkeypatch, tmp_path):
+    fns = _handlers(monkeypatch, tmp_path)
+    cfg, novel, _out = _book(tmp_path, [_row(0, "あ")])
+    *_, loaded, _s, _a = fns["show_script_clearing"](None, str(novel), None)
+    *_, sel, audio = fns["show_script_clearing"](None, str(novel), loaded)
+    assert (sel, audio) == (NO_UPDATE, NO_UPDATE)
+
+
+def test_台本を作り直すと選択と音声が消える(monkeypatch, tmp_path):
+    fns = _handlers(monkeypatch, tmp_path)
+    novel = tmp_path / "n.txt"
+    novel.write_text("第一章\n本文です。\n", encoding="utf-8")
+    outs = list(fns["run_script"](None, str(novel), "", True, False, False, None, "cpu", "fp32", "none",
+                                  "ollama", "http://x", "m", False, 1, [], []))
+    assert outs[-1][-2:] == (None, None)
+    assert all(o[-2:] == (NO_UPDATE, NO_UPDATE) for o in outs if not isinstance(o[2], list))
+
+
+def test_取り直しは選択を消さない(monkeypatch, tmp_path):
+    rows = [_row(0, "あ")]
+    fns, fake, novel = _retake_setup(monkeypatch, tmp_path, rows)
+    outs = list(fns["retake_row"](0, dataframe_rows(rows), rows, None, str(novel), *TTS))
+    assert all(len(o) == 4 for o in outs)  # selected_idx を出力に持たない = 選択は State に残る

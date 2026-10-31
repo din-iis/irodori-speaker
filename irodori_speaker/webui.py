@@ -665,6 +665,13 @@ def build_app(cfg: Config):
         status = f"既存の script.tsv を読み込みました（{len(rows)} 行）"
         return gr.update(value=dataframe_rows(rows)), rows, status, str(novel)
 
+    def show_script_clearing(novel_file, novel_text, loaded):
+        """show_script に加えて、表を置き換えるとき（別の小説・読み直し）だけ行の選択と音声を消す。"""
+        keep = gr.update()
+        res = show_script(novel_file, novel_text, loaded)
+        replaced = isinstance(res[1], list)  # script_rows が置き換わったとき
+        return (*res, None, None) if replaced else (*res, keep, keep)
+
     def save_script(df, original, novel_file, novel_text):
         try:
             out_dir = book_dir(cfg, _novel_path(novel_file, novel_text))
@@ -908,7 +915,9 @@ def build_app(cfg: Config):
             for out in run_novel(mode, *args, progress=progress):
                 # 表を更新したら、直近に読み込んだ小説もそれに合わせる（blur で消えないように）
                 table_updated = mode != "synth" and isinstance(out[2], list)
-                yield (*out, str(_novel_path(args[0], args[1])) if table_updated else gr.update())
+                # 表を作り直したら、取り直しの対象に選んだ行（番号）も無効なので消す
+                clear = (None, None) if table_updated else (gr.update(), gr.update())
+                yield (*out, str(_novel_path(args[0], args[1])) if table_updated else gr.update(), *clear)
 
         handler.__name__ = f"run_{mode}"
         return handler
@@ -1071,7 +1080,9 @@ def build_app(cfg: Config):
                 novel_file, novel_text, chapters, no_emotion, reannotate, force,
                 *tts_inputs, *llm_inputs, table, script_rows, *lora_inputs,
             ]
-            novel_outputs = [novel_status, table, script_rows, chapter_files, full_audio, loaded_novel]
+            novel_outputs = [
+                novel_status, table, script_rows, chapter_files, full_audio, loaded_novel, selected_idx, seg_audio,
+            ]
             for btn, mode in ((script_btn, "script"), (synth_btn, "synth"), (all_btn, "all")):
                 btn.click(make_handler(mode), novel_inputs, novel_outputs, **gpu)
             stop_btn.click(stop_run, None, None)
@@ -1097,7 +1108,9 @@ def build_app(cfg: Config):
             save_btn.click(save_script, [table, script_rows, novel_file, novel_text], [script_rows, novel_status])
             for trigger in (novel_file.change, novel_text.submit, novel_text.blur):
                 trigger(
-                    show_script, [novel_file, novel_text, loaded_novel], [table, script_rows, novel_status, loaded_novel]
+                    show_script_clearing,
+                    [novel_file, novel_text, loaded_novel],
+                    [table, script_rows, novel_status, loaded_novel, selected_idx, seg_audio],
                 )
 
     app.irodori_css = css  # Gradio 6 以降は css を launch() に渡す

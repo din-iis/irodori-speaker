@@ -314,15 +314,15 @@ def test_show_script_は同じ小説なら表を変えない(monkeypatch, tmp_pa
     (out_dir / "chapters.json").write_text('{"chapters": [{"idx": 0, "title": "t"}]}', encoding="utf-8")
     write_script(out_dir / "script.tsv", [_row(0, "あ")])
 
-    table, rows, status, loaded = fns["show_script"](None, str(novel), None)
+    table, rows, status, loaded, *_clear = fns["show_script_clearing"](None, str(novel), None)
     assert rows and loaded == str(novel)
-    again = fns["show_script"](None, str(novel), loaded)
+    again = fns["show_script_clearing"](None, str(novel), loaded)
     assert again[1] == {"__type__": "update"} and again[0] == {"__type__": "update"}
     assert again[3] == loaded
 
     other = tmp_path / "m.txt"
     other.write_text("本文", encoding="utf-8")
-    assert fns["show_script"](None, str(other), loaded)[3] == str(other)
+    assert fns["show_script_clearing"](None, str(other), loaded)[3] == str(other)
 
 
 def replace_output(cfg, tmp_path):
