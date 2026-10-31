@@ -320,6 +320,27 @@ def synthesize_book(
     return BookResult(chapter_files, full, stopped=False, stale_chapters=stale)
 
 
+def _write_credits_union(path: Path, choices: list) -> None:
+    """CREDITS.txt を、既存の行と今回の選択の行の和集合（既存の行の順が先）で書く。"""
+    from . import bgm_mix
+
+    new_path = path.with_name(path.name + ".new")
+    try:
+        bgm_mix.write_credits(new_path, choices)
+        new_lines = new_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    finally:
+        new_path.unlink(missing_ok=True)
+    old_lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
+    merged = list(dict.fromkeys(old_lines + new_lines))
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text("".join(merged), encoding="utf-8")
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _remove_old_full(out_dir: Path) -> None:
     old = out_dir / f"{out_dir.name}_full.wav"
     if old.exists():
@@ -484,8 +505,10 @@ def _build_bgm(
         del scorer
     bgm_select.write_selection(bgm_dir / "selection.json", choices, set(targets), all_chapters)
     bgm_select.write_missing(bgm_dir / "missing.tsv", choices, scenes)
-    # 重ね合わせの途中で失敗しても、書いた章 MP3 のクレジットが残るよう先に書く
-    bgm_mix.write_credits(bgm_dir / "CREDITS.txt", bgm_select.load_selection(bgm_dir / "selection.json"))
+    # 重ね合わせの途中で失敗しても、残る MP3 のクレジットを失わないよう、既存の行との和集合で先に書く
+    credits_path = bgm_dir / "CREDITS.txt"
+    selected = bgm_select.load_selection(bgm_dir / "selection.json")
+    _write_credits_union(credits_path, selected)
 
     # 5. 章ごとの重ね合わせ
     download = deps.download or freesound.download_preview
@@ -546,6 +569,9 @@ def _build_bgm(
             for p in downloaded:
                 p.unlink(missing_ok=True)
         sig_file.write_text(signature, encoding="utf-8")
+
+    # 全章を重ね終えたので、今回の選択だけに書き直す（使わなくなった音の行を落とす）
+    bgm_mix.write_credits(credits_path, selected)
 
     # 6. 通し
     # 通しは、章タイトルにある全章の MP3 が今回の署名と一致するときだけ（rows に無い章があれば作らない）

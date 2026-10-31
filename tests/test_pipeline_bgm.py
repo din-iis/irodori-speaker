@@ -390,3 +390,38 @@ def test_failed_remix_removes_old_chapter_mp3_and_sig(tmp_path, monkeypatch):
         build_bgm(cfg2, out_dir, deps=make_deps([]))
     assert not old.exists()
     assert not old.with_name(old.name + ".sig").exists()
+
+
+def _exclude_first_sound_run(tmp_path, monkeypatch=None, fail=False):
+    """1 回目で ID 1・2 の音を選び、ID 1 を除外して 2 回目（重ね直し）を走らせる。"""
+    cfg, out_dir = make_book(tmp_path)
+    build_bgm(cfg, out_dir, deps=make_deps([]))
+    credits = out_dir / "bgm" / "CREDITS.txt"
+    text = credits.read_text(encoding="utf-8")
+    assert "sound 1 by" in text and "sound 2 by" in text
+    (out_dir / "bgm" / "exclude.txt").write_text("1\n", encoding="utf-8")
+    if fail:
+        def boom(*a, **k):
+            raise RuntimeError("render 失敗")
+
+        monkeypatch.setattr(bgm_mix, "render", boom)
+        with pytest.raises(RuntimeError, match="render 失敗"):
+            build_bgm(cfg, out_dir, deps=make_deps([]))
+    else:
+        build_bgm(cfg, out_dir, deps=make_deps([]))
+    return credits.read_text(encoding="utf-8")
+
+
+@needs_ffmpeg
+def test_credits_keep_old_lines_when_remix_fails(tmp_path, monkeypatch):
+    text = _exclude_first_sound_run(tmp_path, monkeypatch, fail=True)
+    assert "sound 1 by" in text  # 古い MP3 がまだ残る音のクレジットを失わない
+    assert "sound 2 by" in text
+    assert text.count("sound 2 by") == 1  # 同じ行は 1 回
+
+
+@needs_ffmpeg
+def test_credits_rewritten_with_current_selection_after_success(tmp_path):
+    text = _exclude_first_sound_run(tmp_path)
+    assert "sound 2 by" in text
+    assert "sound 1 by" not in text  # 使わなくなった音の行は落とす
