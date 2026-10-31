@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,10 +10,9 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from irodori_speaker import pipeline
+from irodori_speaker import check, cli, pipeline
 from irodori_speaker.config import Config
-from irodori_speaker.synth import row_seed
-from irodori_speaker.text_splitter import build_chapters
+from irodori_speaker.synth import Synthesizer, row_seed
 
 NOVEL = Path(__file__).parent / "sample_novel.txt"
 
@@ -126,11 +126,6 @@ def test_署名は_seed_があるときだけ変わる(book):
 
 
 # ---------- check_book ----------
-
-import json  # noqa: E402
-
-from irodori_speaker import check, cli  # noqa: E402
-from irodori_speaker.synth import Synthesizer  # noqa: E402
 
 SR = 16000
 

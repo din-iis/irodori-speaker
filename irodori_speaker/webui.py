@@ -647,9 +647,9 @@ def build_app(cfg: Config):
     def select_row(df, original, novel_file, novel_text, checkpoint, device, precision, voice, evt):
         keep = gr.update()
         index = getattr(evt, "index", None)
-        if index is None or isinstance(index, int) or len(index) == 0:
+        if index is None or (not isinstance(index, int) and len(index) == 0):
             return keep, keep, keep
-        idx = index[0]
+        idx = index if isinstance(index, int) else index[0]
         try:
             out_dir = book_dir(cfg, _novel_path(novel_file, novel_text))
             rows = current_rows(df, original, out_dir)
