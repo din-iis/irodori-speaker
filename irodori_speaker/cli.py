@@ -177,6 +177,12 @@ def _run_bgm(args, cfg: Config, out_dir: Path) -> int:
         overrides["model"] = args.llm_model
     if args.think:
         overrides["think"] = True
+    # 音量は指定したときだけ、この実行にだけ config を上書きする（config.yaml は書き換えない）
+    levels = {
+        k: v for k, v in (("ambient_db", args.ambient_db), ("music_db", args.music_db)) if v is not None
+    }
+    if levels:
+        cfg = replace(cfg, bgm=replace(cfg.bgm, **levels))
     with tqdm(total=1, desc="BGM", unit="段階") as bar:
         last = [0]
 
@@ -323,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--replan", action="store_true", help="場面の区切りをやり直す（場面の説明が変わるので、ふるい分けと採点もやり直し）")
     p.add_argument("--llm-model", help="LLM のモデル名（config を上書き）")
     p.add_argument("--think", action="store_true", help="LLM の思考モードを有効にする")
+    p.add_argument("--ambient-db", type=float, help="環境音の音量（声に対する dB。config の bgm.ambient_db を上書き）")
+    p.add_argument("--music-db", type=float, help="音楽の音量（声に対する dB。config の bgm.music_db を上書き）")
 
     p = sub.add_parser("check", help="synth 済みの文を調べて、怪しい文に印を付けた check.tsv を作る")
     common(p)

@@ -13,10 +13,9 @@ from irodori_speaker.bgm_mix import (
     load_times,
     loop_to,
     mix_signature,
+    loudness_db,
     render,
-    rms_db,
     trim_silence,
-    voice_level_db,
     write_credits,
 )
 from irodori_speaker.bgm_types import Choice, Scene, Sound
@@ -195,39 +194,34 @@ def _noise(n: int, db: float, channels: int = 2) -> np.ndarray:
     return x
 
 
-def test_voice_level_db_ignores_silent_frames():
-    sr = 1000
-    x = np.concatenate([_sine(sr, sr, -20.0), np.zeros(sr, dtype="float32")])
-    assert voice_level_db(x, sr) == pytest.approx(-20.0, abs=0.5)
-    assert rms_db(_sine(sr, sr, -20.0)) == pytest.approx(-20.0, abs=0.1)
-    assert rms_db(np.zeros(10, dtype="float32")) == -np.inf
-
-
 def test_render_levels():
-    sr = 1000
+    sr = 24000
     n = 20 * sr
     narration = np.concatenate([_sine(10 * sr, sr, -20.0), np.zeros(10 * sr, dtype="float32")])
     layout = Layout(total=n, voice=[(0, n, 0)], ambient=[Track("0:0:ambient", 0, n, 0, 0)], music=[])
-    out = render(layout, narration, {"0:0:ambient": _noise(5 * sr, -10.0)}, sr, BgmConfig())
+    out = render(layout, narration, {"0:0:ambient": _noise(20 * sr, -10.0)}, sr, BgmConfig())
     assert out.shape == (n, 2)
-    # 朗読の無い区間の環境音は 朗読 -20 + ambient_db(-20) = -40 dBFS
-    assert rms_db(out[12 * sr : 19 * sr]) == pytest.approx(-40.0, abs=1.5)
+    # 朗読の無い区間の環境音は、声の音量（dual mono）+ ambient_db(-20)
+    voice = loudness_db(narration, sr) + 10 * np.log10(2)
+    assert loudness_db(out[12 * sr : 19 * sr], sr) == pytest.approx(voice - 20.0, abs=1.0)
 
 
 def test_render_music_level():
-    sr = 1000
+    sr = 24000
     n = 10 * sr
     narration = _sine(n, sr, -20.0)
     layout = Layout(total=n, voice=[], ambient=[], music=[Track("0:0:intro", 0, n, 0, 0)])
-    out = render(layout, narration, {"0:0:intro": _noise(8 * sr, -5.0)}, sr, BgmConfig())
-    assert rms_db(out[sr : 9 * sr]) == pytest.approx(-23.0, abs=1.5)
+    out = render(layout, narration, {"0:0:intro": _noise(10 * sr, -5.0)}, sr, BgmConfig())
+    voice = loudness_db(narration, sr) + 10 * np.log10(2)
+    assert loudness_db(out[sr : 9 * sr], sr) == pytest.approx(voice - 3.0, abs=1.0)
 
 
 def test_render_applies_fades():
-    sr = 1000
+    sr = 24000
     n = 10 * sr
     layout = Layout(total=n, voice=[], ambient=[], music=[Track("m", 0, n, sr, sr)])
-    out = render(layout, _sine(n, sr, -20.0), {"m": np.ones((n, 2), dtype="float32")}, sr, BgmConfig())
+    # 一定値は K 特性で音量が無い（直流は通らない）ので、雑音を素材にする
+    out = render(layout, _sine(n, sr, -20.0), {"m": _noise(n, -10.0)}, sr, BgmConfig())
     assert abs(out[0]).max() < 0.01 * abs(out[n // 2]).max()
     assert abs(out[-1]).max() < 0.01 * abs(out[n // 2]).max()
 
