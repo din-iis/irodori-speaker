@@ -201,6 +201,86 @@ def labels_from_str(s: str) -> list[Annotation]:
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
+def _chat_ollama(cfg: LLMConfig, system: str, user: str, schema: dict) -> object:
+    resp = requests.post(
+        f"{cfg.base_url.rstrip('/')}/api/chat",
+        headers=_auth_headers(cfg),
+        json={
+            "model": cfg.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "think": cfg.think,
+            "format": schema,
+            "stream": False,
+            "options": {"temperature": 0},
+        },
+        timeout=cfg.timeout,
+    )
+    resp.raise_for_status()
+    content = _json_object(resp)["message"]["content"]
+    if not isinstance(content, str):
+        raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
+    return json.loads(content)
+
+
+def _chat_openai(cfg: LLMConfig, system: str, user: str, schema: dict, name: str) -> object:
+    headers = _auth_headers(cfg)
+    body: dict = {
+        "model": cfg.model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "temperature": 0,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": schema, "strict": True},
+        },
+        "chat_template_kwargs": {"enable_thinking": cfg.think},
+    }
+    if not cfg.think:
+        body["reasoning_effort"] = "none"
+    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
+    for attempt in range(3):
+        resp = requests.post(url, headers=headers, json=body, timeout=cfg.timeout)
+        if resp.status_code != 400 or attempt == 2:
+            break
+        if attempt == 0:
+            body["response_format"] = {"type": "json_object"}
+        else:
+            for key in ("response_format", "chat_template_kwargs", "reasoning_effort"):
+                body.pop(key, None)
+    resp.raise_for_status()
+    choices = _json_object(resp).get("choices")
+    if not choices:
+        raise ValueError("応答の choices が空です")
+    content = choices[0]["message"]["content"]
+    if not isinstance(content, str):
+        raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
+    return json.loads(_THINK_RE.sub("", content).strip())
+
+
+def chat_json(cfg: LLMConfig, system: str, user: str, schema: dict, name: str) -> object:
+    """設定の LLM に system / user を送り、schema に沿った JSON を返す。"""
+    if cfg.api == "ollama":
+        return _chat_ollama(cfg, system, user, schema)
+    if cfg.api == "openai":
+        return _chat_openai(cfg, system, user, schema, name)
+    raise ValueError(f"llm.api は ollama か openai にしてください: {cfg.api!r}")
+
+
+def unload_model(cfg: LLMConfig) -> None:
+    """Ollama のモデルを即時解放する。openai のときは LLMServer が担当。"""
+    if not cfg.unload or cfg.api != "ollama":
+        return
+    try:
+        resp = requests.post(
+            f"{cfg.base_url.rstrip('/')}/api/generate",
+            headers=_auth_headers(cfg),
+            json={"model": cfg.model, "keep_alive": 0},
+            timeout=cfg.timeout,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[emotion] モデルの解放に失敗しました: {e}")
+
+
 class LLMAnnotator:
     """段落ごとに LLM へ問い合わせ、句ごとの感情を jsonl にキャッシュする。"""
 
@@ -231,70 +311,7 @@ class LLMAnnotator:
             return False
 
     def _chat(self, user_prompt: str) -> object:
-        if self.cfg.api == "ollama":
-            return self._chat_ollama(user_prompt)
-        if self.cfg.api == "openai":
-            return self._chat_openai(user_prompt)
-        raise ValueError(f"llm.api は ollama か openai にしてください: {self.cfg.api!r}")
-
-    def _messages(self, user_prompt: str) -> list[dict]:
-        return [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-
-    def _chat_ollama(self, user_prompt: str) -> object:
-        resp = requests.post(
-            f"{self.cfg.base_url.rstrip('/')}/api/chat",
-            headers=_auth_headers(self.cfg),
-            json={
-                "model": self.cfg.model,
-                "messages": self._messages(user_prompt),
-                "think": self.cfg.think,
-                "format": JSON_SCHEMA,
-                "stream": False,
-                "options": {"temperature": 0},
-            },
-            timeout=self.cfg.timeout,
-        )
-        resp.raise_for_status()
-        content = _json_object(resp)["message"]["content"]
-        if not isinstance(content, str):
-            raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
-        return json.loads(content)
-
-    def _chat_openai(self, user_prompt: str) -> object:
-        headers = _auth_headers(self.cfg)
-        body: dict = {
-            "model": self.cfg.model,
-            "messages": self._messages(user_prompt),
-            "temperature": 0,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "emotion_segments", "schema": JSON_SCHEMA, "strict": True},
-            },
-            "chat_template_kwargs": {"enable_thinking": self.cfg.think},
-        }
-        if not self.cfg.think:
-            body["reasoning_effort"] = "none"
-        url = f"{self.cfg.base_url.rstrip('/')}/chat/completions"
-        for attempt in range(3):
-            resp = requests.post(url, headers=headers, json=body, timeout=self.cfg.timeout)
-            if resp.status_code != 400 or attempt == 2:
-                break
-            if attempt == 0:
-                body["response_format"] = {"type": "json_object"}
-            else:
-                for key in ("response_format", "chat_template_kwargs", "reasoning_effort"):
-                    body.pop(key, None)
-        resp.raise_for_status()
-        choices = _json_object(resp).get("choices")
-        if not choices:
-            raise ValueError("応答の choices が空です")
-        content = choices[0]["message"]["content"]
-        if not isinstance(content, str):
-            raise ValueError(f"応答の message.content が文字列ではありません: {content!r}")
-        return json.loads(_THINK_RE.sub("", content).strip())
+        return chat_json(self.cfg, SYSTEM_PROMPT, user_prompt, JSON_SCHEMA, "emotion_segments")
 
     def annotate(
         self,
@@ -356,18 +373,7 @@ class LLMAnnotator:
 
     def unload(self) -> None:
         """Ollama のモデルを即時解放する。openai のときは LLMServer が担当。"""
-        if not self.cfg.unload or self.cfg.api != "ollama":
-            return
-        try:
-            resp = requests.post(
-                f"{self.cfg.base_url.rstrip('/')}/api/generate",
-                headers=_auth_headers(self.cfg),
-                json={"model": self.cfg.model, "keep_alive": 0},
-                timeout=self.cfg.timeout,
-            )
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"[emotion] モデルの解放に失敗しました: {e}")
+        unload_model(self.cfg)
 
 
 def _health_url(cfg: LLMConfig) -> str:

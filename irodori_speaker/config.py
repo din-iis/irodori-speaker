@@ -79,6 +79,27 @@ class SilenceConfig:
 
 
 @dataclass
+class BgmConfig:
+    secrets_file: str = "~/.config/irodori-speaker/secrets.env"
+    clap_model: str = "laion/larger_clap_general"
+    device: str = "cuda"
+    candidates: int = 12
+    ambient_duration: str = "[30 TO 900]"
+    music_duration: str = "[30 TO 300]"
+    scene_chunk_chars: int = 3000
+    min_scene_chars: int = 400
+    download_workers: int = 6
+    ambient_db: float = -20.0
+    music_db: float = -3.0
+    intro_seconds: float = 20.0
+    bridge_seconds: float = 8.0
+    music_fade_in: float = 2.0
+    music_fade_out: float = 3.0
+    ambient_crossfade: float = 4.0
+    mp3_bitrate: str = "192k"
+
+
+@dataclass
 class Config:
     checkpoint: str = "Aratako/Irodori-TTS-v4.1-Small"
     codec_repo: str = "Aratako/Semantic-DACVAE-Japanese-32dim"
@@ -100,6 +121,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     split: SplitConfig = field(default_factory=SplitConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
+    bgm: BgmConfig = field(default_factory=BgmConfig)
     output_dir: str = "out"
 
 
@@ -108,6 +130,7 @@ _SECTIONS = {
     "llm": LLMConfig,
     "split": SplitConfig,
     "silence": SilenceConfig,
+    "bgm": BgmConfig,
 }
 
 
@@ -130,6 +153,13 @@ def _build(cls, data: dict[str, Any]):
         n = kwargs["max_chars"]
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             raise ValueError("Config: split.max_chars は 1 以上の整数にしてください")
+    if cls is BgmConfig:
+        fades = kwargs.get("music_fade_in", 2.0) + kwargs.get("music_fade_out", 3.0)
+        for name, default in (("bridge_seconds", 8.0), ("intro_seconds", 20.0)):
+            if kwargs.get(name, default) < fades:
+                raise ValueError(
+                    f"Config: bgm.{name} は music_fade_in と music_fade_out の合計（{fades}）以上にしてください"
+                )
     if cls is Config:
         for key, sub in _SECTIONS.items():
             if key in kwargs:

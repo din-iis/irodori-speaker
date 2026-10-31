@@ -66,3 +66,32 @@ def test_max_chars_は_1_以上の整数でなければ拒否する(tmp_path, va
     p.write_text(f"split:\n  max_chars: {value}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="max_chars"):
         load_config(p)
+
+
+def test_bgm_defaults():
+    cfg = load_config(None)
+    assert cfg.bgm.ambient_db == -20.0 and cfg.bgm.bridge_seconds == 8.0
+    assert cfg.bgm.music_fade_in == 2.0 and cfg.bgm.music_fade_out == 3.0
+
+
+def test_bgm_section_parsed_and_unknown_key_rejected(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("bgm:\n  ambient_db: -24\n", encoding="utf-8")
+    assert load_config(p).bgm.ambient_db == -24
+    p.write_text("bgm:\n  nope: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(p)
+
+
+def test_bgm_bridge_must_fit_fades(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("bgm:\n  bridge_seconds: 4\n", encoding="utf-8")  # 2 + 3 > 4
+    with pytest.raises(ValueError):
+        load_config(p)
+
+
+def test_bgm_intro_must_fit_fades(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("bgm:\n  intro_seconds: 4\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(p)
