@@ -421,6 +421,13 @@ def _sig_path(chapter_wav: Path) -> Path:
     return chapter_wav.with_name(chapter_wav.name + ".sig")
 
 
+def _synth_identity(synth) -> list:
+    """読み辞書と LoRA は、どちらかがあるときだけ署名に入れる（既存の .sig を無効にしない）。"""
+    readings = getattr(synth, "readings_key", None)
+    lora = getattr(synth, "lora_key", None)
+    return [{"readings": readings, "lora": lora}] if readings or lora else []
+
+
 def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
     payload = [
         [spoken_text(r) for r in rows],
@@ -430,6 +437,7 @@ def chapter_signature(rows: list[dict], cfg: Config, synth) -> str:
         asdict(cfg.silence),
         cfg.checkpoint,
         getattr(synth, "latent_key", None),
+        *_synth_identity(synth),
         TEXT_RULE,
     ]
     return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()

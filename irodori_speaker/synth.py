@@ -9,6 +9,9 @@ import numpy as np
 import soundfile as sf
 
 from .config import Config
+from .lora import lora_key as _lora_key
+from .lora import lora_stamp, resolve_lora_adapter
+from .readings import apply_readings, readings_key as _readings_key
 from .voices import voice_key as _voice_key
 
 _DURATION_RE = re.compile(
@@ -77,13 +80,14 @@ def tts_text(text: str) -> str:
     return stripped + tail
 
 
-def cache_key(cfg: Config, text: str, latent_key: str) -> str:
+def cache_key(cfg: Config, text: str, latent_key: str, lora_key: str | None = None) -> str:
     s = cfg.sampling
     return _sha1(
         {
             "text": text,
             "text_rule": TEXT_RULE,
             "latent": latent_key,
+            **({"lora": lora_key} if lora_key else {}),  # 値があるときだけ（既存のキャッシュを無効にしない）
             "checkpoint": cfg.checkpoint,
             "num_steps": s.num_steps,
             "t_schedule_mode": s.t_schedule_mode,
@@ -97,6 +101,14 @@ def cache_key(cfg: Config, text: str, latent_key: str) -> str:
     )
 
 
+def segment_cache_key(
+    cfg: Config, text: str, latent_key: str, *, readings: dict[str, str] | None = None,
+    lora_key: str | None = None,
+) -> str:
+    """読み辞書を適用した本文でのキー。モデルに渡る本文と一致する。"""
+    return cache_key(cfg, apply_readings(text, readings), latent_key, lora_key=lora_key)
+
+
 def resolve_checkpoint(checkpoint: str) -> str:
     local = Path(checkpoint).expanduser()
     if local.exists():
@@ -106,7 +118,7 @@ def resolve_checkpoint(checkpoint: str) -> str:
     return download_hf_checkpoint(checkpoint)
 
 
-_LOADED_KEY = None  # 直近に get_cached_runtime へ渡した RuntimeKey（上流の runtime が載っている目印）
+_LOADED_KEY = None  # 直近に get_cached_runtime へ渡した (RuntimeKey, lora_key)（上流の runtime が載っている目印）
 
 
 def release_runtime() -> None:
@@ -133,13 +145,17 @@ def _runtime_key(cfg: Config, checkpoint: str | None = None):
     )
 
 
-def load_runtime(cfg: Config, checkpoint: str | None = None):
-    """上流のキャッシュから runtime を得る。キーが変わるときだけ VRAM を確認する。"""
+def load_runtime(cfg: Config, checkpoint: str | None = None, lora_key: str | None = None):
+    """上流のキャッシュから runtime を得る。キーが変わるときだけ VRAM を確認する。
+
+    上流は一度読んだ LoRA アダプタをモデルから外さないので、アダプタが変わる（外す場合も）ときは runtime ごと読み直す。
+    """
     global _LOADED_KEY
     from irodori_tts.inference_runtime import clear_cached_runtime, get_cached_runtime
 
     key = _runtime_key(cfg, checkpoint)
-    if key != _LOADED_KEY:
+    loaded = (key, lora_key)
+    if loaded != _LOADED_KEY:
         if _LOADED_KEY is not None:
             # 上流は新 runtime を作ってから旧を unload するので、先に解放して二重ロードと VRAM 不足の誤検知を避ける
             clear_cached_runtime()
@@ -150,7 +166,7 @@ def load_runtime(cfg: Config, checkpoint: str | None = None):
     except BaseException:
         _LOADED_KEY = None
         raise
-    _LOADED_KEY = key
+    _LOADED_KEY = loaded
     if not runtime.model_cfg.use_speaker_condition_resolved:
         raise ValueError("このチェックポイントは参照音声に対応していません")
     return runtime
@@ -243,6 +259,7 @@ class Synthesizer:
         voice_paths: list[Path],
         latent_cache_dir: Path,
         warnings_path: Path | None = None,
+        readings: dict[str, str] | None = None,
     ) -> None:
         self.cfg = cfg
         self.segments_dir = Path(segments_dir)
@@ -250,6 +267,11 @@ class Synthesizer:
         self.voice_paths = [Path(p) for p in voice_paths]
         self.latent_cache_dir = Path(latent_cache_dir)
         self.warnings_path = Path(warnings_path) if warnings_path else None
+        self.readings = readings
+        # runtime に触る前に検証する（不足は日本語の ValueError）
+        self.lora_path = resolve_lora_adapter(cfg.lora_adapter)
+        self.lora_key = _lora_key(self.lora_path) if self.lora_path else None
+        self._lora_stamp = lora_stamp(self.lora_path) if self.lora_path else None
         self.last_warnings: list[str] = []
         # voice_paths が空なら参照音声なし（no_ref=True で合成する）
         self.latent_key = (
@@ -264,7 +286,26 @@ class Synthesizer:
         # 上流は別キーで呼ばれると旧 runtime を unload するので、インスタンスには保持しない
         if self._checkpoint is None:
             self._checkpoint = resolve_checkpoint(self.cfg.checkpoint)
-        return load_runtime(self.cfg, self._checkpoint)
+        return load_runtime(self.cfg, self._checkpoint, lora_key=self.lora_key)
+
+    def refresh_lora(self) -> None:
+        """同じパスのアダプタが上書きされていたら lora_key を計算し直す（変わらなければ sha1 は取らない）。"""
+        if self.lora_path is None:
+            return
+        path = resolve_lora_adapter(self.cfg.lora_adapter)
+        stamp = lora_stamp(path)
+        if stamp != self._lora_stamp:
+            self.lora_key = _lora_key(path)
+            self._lora_stamp = stamp
+
+    @property
+    def readings_key(self) -> str | None:
+        return _readings_key(self.readings)
+
+    def segment_key(self, text: str) -> str:
+        return segment_cache_key(
+            self.cfg, text, self.latent_key, readings=self.readings, lora_key=self.lora_key
+        )
 
     @property
     def latent_path(self) -> Path | None:
@@ -280,6 +321,9 @@ class Synthesizer:
         s = self.cfg.sampling
         params = {f: getattr(s, f) for f in _SAMPLING_FIELDS}
         params.update(overrides)
+        if self.lora_path:
+            params["lora_adapter"] = str(self.lora_path)
+        text = apply_readings(text, self.readings)  # モデルに渡る直前に 1 回だけ
         if not self.voice_paths:
             return _sampling_request(
                 text=tts_text(text),
@@ -296,7 +340,7 @@ class Synthesizer:
         )
 
     def synthesize(self, text: str, force: bool = False) -> Path:
-        key = cache_key(self.cfg, text, self.latent_key)
+        key = self.segment_key(text)
         path = self.segments_dir / f"{key}.wav"
         if path.exists() and not force:
             self.last_warnings = []
