@@ -391,6 +391,7 @@ def check_book(
     transcriber: Callable[[list[Path]], list[str]] | None = None,
 ) -> CheckResult:
     """合成済みの文（segments/）を調べて、怪しい文に印を付けた check.tsv を書く。GPU は ASR のときだけ使う。"""
+    from .readings import load_readings
     from .synth import Synthesizer
     from .voices import is_no_ref, resolve_voice
 
@@ -404,7 +405,10 @@ def check_book(
     if not cfg.voice:
         raise ValueError("config の voice か --voice で声を指定してください")
     voice_paths = [] if is_no_ref(cfg.voice) else resolve_voice(Path(cfg.voices_dir), cfg.voice)
-    synth = Synthesizer(cfg, out_dir / "segments", voice_paths, Path(cfg.output_dir) / ".voices")
+    synth = Synthesizer(
+        cfg, out_dir / "segments", voice_paths, Path(cfg.output_dir) / ".voices",
+        readings=load_readings(cfg, out_dir),  # LoRA は cfg.lora_adapter から Synthesizer が読む
+    )
     warned = check.read_warned_keys(out_dir / "warnings.log")
 
     checked: list[check.CheckRow] = []

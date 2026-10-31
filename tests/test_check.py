@@ -162,12 +162,19 @@ def test_flags_for_は複数の印を決まった順に返す():
 # ---- キーと warnings.log ----
 
 
-def test_segment_key_は_cache_key_と一致し_seed_列を使う():
-    synth = types.SimpleNamespace(cfg=Config(device="cpu"), latent_key="L")
+def test_segment_key_は_synth_の_segment_key_と一致し_seed_列を使う():
+    from irodori_speaker.synth import Synthesizer
+
+    synth = Synthesizer(Config(device="cpu"), Path("/tmp/irodori-check-seg"), [], Path("/tmp/irodori-check-lat"),
+                        readings={"あ": "ア"})
     row = {"text": "😊あ", "seed": ""}
-    assert check.segment_key(synth, row) == cache_key(synth.cfg, "😊あ", "L")
-    assert check.segment_key(synth, {**row, "seed": "7"}) == cache_key(synth.cfg, "😊あ", "L", 7)
-    assert check.segment_key(synth, {"text": "😊あ"}) == cache_key(synth.cfg, "😊あ", "L")
+    assert check.segment_key(synth, row) == synth.segment_key("😊あ")
+    assert check.segment_key(synth, {**row, "seed": "7"}) == synth.segment_key("😊あ", seed=7)
+    assert check.segment_key(synth, {"text": "😊あ"}) == synth.segment_key("😊あ")
+    # 読み辞書と LoRA がキーに入る（入れ忘れると synthesize が書く WAV を引けない）
+    assert check.segment_key(synth, row) != cache_key(synth.cfg, "😊あ", synth.latent_key)
+    synth.lora_key = "abc"
+    assert check.segment_key(synth, row) == cache_key(synth.cfg, "😊ア", synth.latent_key, lora_key="abc")
 
 
 def test_read_warned_keys_は各行の最初のタブまで(tmp_path):
@@ -259,3 +266,54 @@ def test_write_check_tsv_は_asr_のときだけ_cer_と_transcript_列を足す
     header, rows = _read_tsv(p)
     assert header == check.CHECK_FIELDS + check.ASR_FIELDS
     assert rows[0]["cer"] == "0.500" and rows[0]["transcript"] == "ほんぶん"
+
+
+# ---- ASR はバッチごとに音声を読む ----
+
+
+def test_transcribe_は_batch_size_ごとに読み込んで順序を保つ(tmp_path, monkeypatch):
+    import sys
+
+    paths = []
+    for i in range(7):
+        p = tmp_path / f"{i}.wav"
+        sf.write(p, np.zeros(100 * (i + 1), dtype=np.float32), SR)
+        paths.append(p)
+    batches: list[int] = []
+
+    def fake_asr(inputs, **kw):
+        batches.append(len(inputs))
+        return [{"text": str(len(x["raw"]))} for x in inputs]
+
+    fake = types.ModuleType("transformers")
+    fake.pipeline = lambda *a, **k: fake_asr
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+    got = check.transcribe(paths, "m", "cpu", batch_size=3)
+    assert got == [str(100 * (i + 1)) for i in range(7)]
+    assert batches == [3, 3, 1]
+
+
+def test_transcribe_は音声を全件まとめて読み込まない(tmp_path, monkeypatch):
+    import sys
+
+    paths = [tmp_path / f"{i}.wav" for i in range(5)]
+    for p in paths:
+        sf.write(p, np.zeros(100, dtype=np.float32), SR)
+    live = {"now": 0, "max": 0}
+    real = check._read_mono
+
+    def counting(path):
+        live["now"] += 1
+        live["max"] = max(live["max"], live["now"])
+        return real(path)
+
+    def fake_asr(inputs, **kw):
+        live["now"] -= len(inputs)  # 推論が終わったら破棄される
+        return [{"text": "x"} for _ in inputs]
+
+    monkeypatch.setattr(check, "_read_mono", counting)
+    fake = types.ModuleType("transformers")
+    fake.pipeline = lambda *a, **k: fake_asr
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+    check.transcribe(paths, "m", "cpu", batch_size=2)
+    assert live["max"] <= 2

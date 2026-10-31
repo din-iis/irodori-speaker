@@ -17,7 +17,7 @@ import soundfile as sf
 
 from .assemble import times_path
 from .emoji import emoji_runs
-from .synth import cache_key, row_seed, tts_text
+from .synth import row_seed, tts_text
 
 CHECK_FIELDS = [
     "chapter", "para", "seg", "key", "seconds", "chars", "sec_per_char", "z", "flags", "offset", "text",
@@ -171,7 +171,7 @@ def flags_for(row: CheckRow, z_threshold: float, cer_threshold: float, warned: s
 
 def segment_key(synth, row: dict) -> str:
     """その行の文が segments/ に保存されるときのキー。synthesize と同じ計算に寄せる。"""
-    return cache_key(synth.cfg, row["text"], synth.latent_key, row_seed(row))
+    return synth.segment_key(row["text"], seed=row_seed(row))
 
 
 def read_warned_keys(path: Path) -> set[str]:
@@ -239,14 +239,18 @@ def transcribe(paths: list[Path], model: str, device: str, batch_size: int = 8) 
 
     asr = pipeline("automatic-speech-recognition", model=model, device=device)
     try:
-        inputs = []
-        for p in paths:
-            data, sr = _read_mono(Path(p))
-            inputs.append({"raw": data, "sampling_rate": sr})
-        results = asr(
-            inputs, batch_size=batch_size, generate_kwargs={"language": "ja", "task": "transcribe"}
-        )
-        return [r["text"] for r in results]
+        texts: list[str] = []
+        for i in range(0, len(paths), batch_size):  # 全件を float32 で持たないよう、バッチごとに読んで捨てる
+            inputs = []
+            for p in paths[i : i + batch_size]:
+                data, sr = _read_mono(Path(p))
+                inputs.append({"raw": data, "sampling_rate": sr})
+            results = asr(
+                inputs, batch_size=batch_size, generate_kwargs={"language": "ja", "task": "transcribe"}
+            )
+            texts.extend(r["text"] for r in results)
+            del inputs, results
+        return texts
     finally:
         del asr
         try:

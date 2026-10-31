@@ -21,6 +21,7 @@ from pathlib import Path
 from . import check
 from .config import EMOTIONS, Config, load_config
 from .lora import normalize_lora
+from .synth import row_seed, segment_cache_key
 from .pipeline import (
     TSV_FIELDS,
     book_dir,
@@ -151,6 +152,15 @@ def check_view_rows(rows: list) -> list[list[str]]:
         for r in rows
         if r.flags
     ]
+
+
+def _independent_synth(cfg: Config, out_dir: Path):
+    """鍵の計算だけに使う、Engine に登録しない Synthesizer（モデルは読まない）。"""
+    from .synth import Synthesizer
+    from .voices import resolve_voice
+
+    voice_paths = [] if is_no_ref(cfg.voice) else resolve_voice(Path(cfg.voices_dir), cfg.voice)
+    return Synthesizer(cfg, out_dir / "segments", voice_paths, Path(cfg.output_dir) / ".voices")
 
 
 def current_rows(df, original, out_dir: Path) -> list[dict]:
@@ -373,6 +383,10 @@ class Engine:
         self._synth = None
         self._key = None
         self._ready = False
+
+    def peek(self, key: tuple):
+        """キーが一致する既存の Synthesizer を返すだけ（何も書き換えない）。合成中の共有インスタンスを触らないための参照用。"""
+        return self._synth if self._synth is not None and self._key == key else None
 
     def get(
         self, key: tuple, segments_dir: Path, warnings_path: Path | None = None, out_dir: Path | None = None
@@ -661,7 +675,9 @@ def build_app(cfg: Config):
 
     # -- 選んだ文の確認・取り直し・チェック --
 
-    def select_row(df, original, novel_file, novel_text, checkpoint, device, precision, voice, evt):
+    def select_row(
+        df, original, novel_file, novel_text, checkpoint, device, precision, voice, evt, lora_adapter=None
+    ):
         keep = gr.update()
         index = getattr(evt, "index", None)
         if index is None or (not isinstance(index, int) and len(index) == 0):
@@ -677,11 +693,18 @@ def build_app(cfg: Config):
         row = rows[idx]
         if row.get("kind") == "break":
             return idx, None, "区切り行には音声がありません"
-        key = tts_key(checkpoint, device, precision, voice)
+        key = tts_key(checkpoint, device, precision, voice, lora_adapter)
         try:
-            # モデルは読まない（鍵の計算だけ）
-            synth = engine.get(key, out_dir / "segments", out_dir / "warnings.log")
-            path = synth.segments_dir / f"{check.segment_key(synth, row)}.wav"
+            # モデルは読まず、Engine の状態も変えない（別の本を合成中の共有 Synthesizer を書き換えないため）
+            key_cfg = engine.cfg_for(key)
+            synth = engine.peek(key)
+            if synth is None:
+                synth = _independent_synth(key_cfg, out_dir)
+            wav_key = segment_cache_key(
+                key_cfg, row["text"], synth.latent_key, readings=load_readings(key_cfg, out_dir),
+                lora_key=synth.lora_key, seed=row_seed(row),
+            )
+            path = out_dir / "segments" / f"{wav_key}.wav"
         except ValueError as e:
             raise gr.Error(str(e)) from e
         where = f"章 {int(row['chapter']) + 1} / 段落 {int(row['para']) + 1} / 文 {int(row['seg']) + 1}"
@@ -689,7 +712,9 @@ def build_app(cfg: Config):
             return idx, str(path), f"{where} の音声（キャッシュ）を表示しました"
         return idx, None, f"{where} の音声はまだありません（「音声にする」か取り直しで作ります）"
 
-    def retake_row(idx, df, original, novel_file, novel_text, checkpoint, device, precision, voice):
+    def retake_row(
+        idx, df, original, novel_file, novel_text, checkpoint, device, precision, voice, lora_adapter=None
+    ):
         keep = gr.update()
         if idx is None:
             raise gr.Error("先に台本の表で取り直す文の行をクリックしてください")
@@ -701,12 +726,12 @@ def build_app(cfg: Config):
             row = rows[idx]
             if row.get("kind") == "break":
                 raise ValueError("区切り行は取り直せません")
-            key = tts_key(checkpoint, device, precision, voice)
+            key = tts_key(checkpoint, device, precision, voice, lora_adapter)
             new_seed = next_seed(row.get("seed", ""), engine.cfg_for(key).sampling.seed)
         except ValueError as e:
             raise gr.Error(str(e)) from e
         try:
-            step = ensure_loaded(key, out_dir / "segments", out_dir / "warnings.log")
+            step = ensure_loaded(key, out_dir / "segments", out_dir / "warnings.log", out_dir)
             try:
                 while True:
                     yield keep, keep, keep, next(step)
@@ -722,8 +747,10 @@ def build_app(cfg: Config):
             f"seed={new_seed} で合成しました。「音声にする」で章に反映します {warn_note(synth.last_warnings)}",
         )
 
-    def run_check(novel_file, novel_text, chapters, checkpoint, device, precision, voice, df, original):
-        key = tts_key(checkpoint, device, precision, voice)
+    def run_check(
+        novel_file, novel_text, chapters, checkpoint, device, precision, voice, df, original, lora_adapter=None
+    ):
+        key = tts_key(checkpoint, device, precision, voice, lora_adapter)
         try:
             out_dir = book_dir(cfg, _novel_path(novel_file, novel_text))
             if df is not None and len(df) > 0:  # 表の手直しを保存してから調べる（seed を鍵に使うため）
@@ -1032,18 +1059,18 @@ def build_app(cfg: Config):
             stop_btn.click(stop_run, None, None)
             table.select(
                 select_row,
-                [table, script_rows, novel_file, novel_text, *tts_inputs],
+                [table, script_rows, novel_file, novel_text, *tts_inputs, *lora_inputs],
                 [selected_idx, seg_audio, novel_status],
             )
             retake_btn.click(
                 retake_row,
-                [selected_idx, table, script_rows, novel_file, novel_text, *tts_inputs],
+                [selected_idx, table, script_rows, novel_file, novel_text, *tts_inputs, *lora_inputs],
                 [table, script_rows, seg_audio, novel_status],
                 **gpu,
             )
             check_btn.click(
                 run_check,
-                [novel_file, novel_text, chapters, *tts_inputs, table, script_rows],
+                [novel_file, novel_text, chapters, *tts_inputs, table, script_rows, *lora_inputs],
                 [check_table, novel_status],
             )
             save_btn.click(save_script, [table, script_rows, novel_file, novel_text], [script_rows, novel_status])

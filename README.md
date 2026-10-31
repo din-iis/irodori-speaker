@@ -157,6 +157,7 @@ uv run --no-sync python -m irodori_speaker synth novel.txt -c config.yaml --voic
 | `--asr` | 音声認識（kotoba-whisper）で文字誤り率も調べる。transformers が要る |
 | `--voice ID` | `synth --voice` で作った本の鍵に合わせる（config の `voice` を上書き）。`none` も指定できる |
 | `--checkpoint ID` | `synth --checkpoint` で作った本の鍵に合わせる（config の `checkpoint` を上書き） |
+| `--lora-adapter DIR` | `synth --lora-adapter` で作った本の鍵に合わせる。読み辞書（`readings`・`readings.yaml`）も `synth` と同じものを使う |
 
 `--help` で各サブコマンドのオプションを確認できます。
 

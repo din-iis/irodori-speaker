@@ -227,3 +227,129 @@ def test_run_check_は印の付いた行だけ表に出す(monkeypatch, tmp_path
     table, status = fns["run_check"](None, str(novel), "", *TTS, dataframe_rows(rows), rows)
     assert table == [["0", "0", "1", "missing", "", "1", "", "い"]]
     assert "2 文中 1 件に印" in status and "check.tsv" in status
+
+
+# ---- 読み辞書・LoRA との統合、共有 Synthesizer を触らないこと ----
+
+
+def _capture_engine(monkeypatch):
+    from irodori_speaker import webui
+
+    engines = []
+    orig = webui.Engine.__init__
+
+    def init(self, cfg):
+        orig(self, cfg)
+        engines.append(self)
+
+    monkeypatch.setattr(webui.Engine, "__init__", init)
+    return engines
+
+
+def test_select_row_は_Engine_の共有_Synthesizer_を書き換えない(monkeypatch, tmp_path):
+    from irodori_speaker.synth import segment_cache_key
+
+    engines = _capture_engine(monkeypatch)
+    fns = _handlers(monkeypatch, tmp_path)
+    rows = [_row(0, "東京", seed="5")]
+    cfg, novel, out = _book(tmp_path, rows)
+    (out / "readings.yaml").write_text("東京: とうきょう\n", encoding="utf-8")
+    other_seg, other_warn = tmp_path / "other" / "segments", tmp_path / "other" / "warnings.log"
+    shared = types.SimpleNamespace(
+        segments_dir=other_seg, warnings_path=other_warn, readings={"x": "y"}, latent_key="L", lora_key="K",
+    )
+    engine = engines[-1]
+    key = engine.key_for(*TTS)
+    engine._synth, engine._key = shared, key
+    expected = segment_cache_key(
+        engine.cfg_for(key), "東京", "L", readings={"東京": "とうきょう"}, lora_key="K", seed=5
+    )
+    wav = out / "segments" / f"{expected}.wav"
+    wav.parent.mkdir(exist_ok=True)
+    sf.write(wav, np.zeros(100, dtype=np.float32), 16000)
+    _idx, path, _status = fns["select_row"](dataframe_rows(rows), rows, None, str(novel), *TTS,
+                                            types.SimpleNamespace(index=[0, 0]))
+    assert path == str(wav)  # この本の読み辞書と、共有 Synthesizer の latent_key / lora_key で引く
+    assert (shared.segments_dir, shared.warnings_path, shared.readings) == (other_seg, other_warn, {"x": "y"})
+    assert engine._synth is shared and engine._key == key
+
+
+def test_select_row_は共有が無ければ独立した_Synthesizer_で引き_Engine_に登録しない(monkeypatch, tmp_path):
+    engines = _capture_engine(monkeypatch)
+    fns = _handlers(monkeypatch, tmp_path)
+    rows = [_row(0, "あ")]
+    _cfg, novel, _out = _book(tmp_path, rows)
+    fns["select_row"](dataframe_rows(rows), rows, None, str(novel), *TTS, types.SimpleNamespace(index=[0, 0]))
+    assert engines[-1]._synth is None and engines[-1]._key is None
+
+
+def test_select_row_は_lora_を_tts_key_に使う(monkeypatch, tmp_path):
+    engines = _capture_engine(monkeypatch)
+    fns = _handlers(monkeypatch, tmp_path)
+    rows = [_row(0, "あ")]
+    cfg, novel, out = _book(tmp_path, rows)
+    adapter = tmp_path / "ad"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_bytes(b"{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"W")
+    from irodori_speaker.lora import lora_key
+    from irodori_speaker.synth import segment_cache_key
+
+    engine = engines[-1]
+    key = engine.key_for(*TTS, str(adapter))
+    expected = segment_cache_key(
+        engine.cfg_for(key), "あ", engine._synth.latent_key if engine._synth else
+        Synthesizer(engine.cfg_for(key), tmp_path / "s", [], tmp_path / "l").latent_key,
+        lora_key=lora_key(adapter),
+    )
+    (out / "segments").mkdir(exist_ok=True)
+    sf.write(out / "segments" / f"{expected}.wav", np.zeros(10, dtype=np.float32), 16000)
+    _i, path, _s = fns["select_row"](dataframe_rows(rows), rows, None, str(novel), *TTS,
+                                     types.SimpleNamespace(index=[0, 0]), lora_adapter=str(adapter))
+    assert path and path.endswith(f"{expected}.wav")
+
+
+def test_retake_row_は読み辞書と_LoRA_のキーで_WAV_を書く(monkeypatch, tmp_path):
+    from irodori_speaker import synth as synth_mod
+    from irodori_speaker import webui
+
+    fns = _handlers(monkeypatch, tmp_path)
+    rows = [_row(0, "東京", seed="")]
+    cfg, novel, out = _book(tmp_path, rows)
+    monkeypatch.setattr(synth_mod, "_sampling_request", lambda **kw: types.SimpleNamespace(**kw))
+    monkeypatch.setattr(synth_mod, "_save_wav", lambda path, audio, sr: Path(path).write_bytes(b"RIFF"))
+    runtime = types.SimpleNamespace(
+        synthesize=lambda req: types.SimpleNamespace(audio="A", sample_rate=48000, messages=[])
+    )
+    monkeypatch.setattr(Synthesizer, "runtime", property(lambda self: runtime))
+    real = Synthesizer(replace(cfg, device="cpu", precision="fp32", voice="none"), out / "segments", [],
+                       tmp_path / "lat", readings={"東京": "とうきょう"})
+    real.lora_key = "K"
+    seen = []
+    monkeypatch.setattr(webui.Engine, "is_loaded", lambda self, key: True)
+    monkeypatch.setattr(webui.Engine, "load", lambda self, *a, **k: seen.append((a, k)) or real)
+    outs = list(fns["retake_row"](0, dataframe_rows(rows), rows, None, str(novel), *TTS))
+    table, state, audio, status = outs[-1]
+    new_seed = int(state[0]["seed"])
+    assert Path(audio).name == f"{real.segment_key('東京', seed=new_seed)}.wav" and Path(audio).exists()
+    assert real.segment_key("東京", seed=new_seed) != Synthesizer(
+        real.cfg, tmp_path / "x", [], tmp_path / "lat").segment_key("東京", seed=new_seed)
+    (args, _kwargs), = seen  # out_dir を渡して、本ごとの読み辞書に差し替えさせる
+    assert out in args or _kwargs.get("out_dir") == out
+
+
+def test_run_check_は_lora_入りの_cfg_を_check_book_に渡す(monkeypatch, tmp_path):
+    from irodori_speaker import pipeline, webui
+
+    fns = _handlers(monkeypatch, tmp_path)
+    rows = [_row(0, "あ")]
+    _cfg, novel, out = _book(tmp_path, rows)
+    seen = []
+
+    def fake(cfg, out_dir, **kw):
+        seen.append(cfg.lora_adapter)
+        return pipeline.CheckResult(out_dir / "check.tsv", [], 0, 0)
+
+    monkeypatch.setattr(webui, "check_book", fake)
+    fns["run_check"](None, str(novel), "", *TTS, dataframe_rows(rows), rows, lora_adapter="/x/ad")
+    assert seen == ["/x/ad"]

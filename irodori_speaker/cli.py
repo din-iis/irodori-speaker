@@ -227,6 +227,8 @@ ASR_MISSING = (
 def _run_check(args, cfg: Config, out_dir: Path) -> int:
     if args.checkpoint:
         cfg = replace(cfg, checkpoint=args.checkpoint)
+    if args.lora_adapter:
+        cfg = replace(cfg, lora_adapter=normalize_lora(args.lora_adapter))
     cfg = replace(cfg, voice=args.voice or cfg.voice)
     with tqdm(total=1, desc="品質チェック", unit="文") as bar:
         last = [0]

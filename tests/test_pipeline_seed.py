@@ -327,3 +327,67 @@ def test_cli_check_は_asr_で_transformers_が無ければ_2(tmp_path, monkeypa
     monkeypatch.setattr(check, "transcribe_with", boom)
     assert cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none", "--asr"]) == 2
     assert "transformers" in capsys.readouterr().out
+
+
+# ---------- 読み辞書・LoRA とキーを揃える ----
+
+
+def _fake_runtime_synth(monkeypatch, cfg, out, readings=None):
+    """runtime を偽にした本物の Synthesizer（segment_key は本物）。"""
+    import types
+
+    from irodori_speaker import synth as synth_mod
+
+    monkeypatch.setattr(synth_mod, "_sampling_request", lambda **kw: types.SimpleNamespace(**kw))
+    monkeypatch.setattr(
+        synth_mod, "_save_wav",
+        lambda path, audio, sr: sf.write(path, np.zeros(4800, dtype=np.float32), 48000, subtype="PCM_16"),
+    )
+    runtime = types.SimpleNamespace(
+        synthesize=lambda req: types.SimpleNamespace(audio="A", sample_rate=48000, messages=[])
+    )
+    monkeypatch.setattr(Synthesizer, "runtime", property(lambda self: runtime))
+    return Synthesizer(cfg, out / "segments", [], Path(cfg.output_dir) / ".voices", readings=readings)
+
+
+def test_check_は読み辞書のある本で_synthesize_book_の_WAV_と一致する(tmp_path, monkeypatch):
+    specs = [(0, 0, 0, "narration", "東京へ行く", None, ""), (0, 0, 1, "narration", "東京から来た", None, "5")]
+    cfg, out, _ = _make_check_book(tmp_path, specs)
+    (out / "readings.yaml").write_text("東京: とうきょう\n", encoding="utf-8")
+    from irodori_speaker.readings import load_readings
+
+    synth = _fake_runtime_synth(monkeypatch, cfg, out, readings=load_readings(cfg, out))
+    titles, rows = pipeline.load_book(out)
+    pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    res = pipeline.check_book(cfg, out)
+    assert all(r.stats is not None for r in res.rows), [r.flags for r in res.rows]
+    assert not any("missing" in r.flags for r in res.rows)
+
+
+def test_check_は_LoRA_のある本で_synthesize_book_の_WAV_と一致する(tmp_path, monkeypatch):
+    adapter = tmp_path / "ad"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_bytes(b"{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"W")
+    cfg = replace(_check_cfg(tmp_path), lora_adapter=str(adapter))
+    cfg, out, _ = _make_check_book(tmp_path, [(0, 0, 0, "narration", "あいう", None, "")], cfg=cfg)
+    synth = _fake_runtime_synth(monkeypatch, cfg, out)
+    titles, rows = pipeline.load_book(out)
+    pipeline.synthesize_book(rows, titles, cfg, out, synth)
+    assert pipeline.check_book(cfg, out).rows[0].stats is not None
+    # LoRA を外した cfg では鍵が違う（= LoRA がキーに入っている）
+    assert pipeline.check_book(replace(cfg, lora_adapter=None), out).rows[0].flags == ["missing"]
+
+
+def test_cli_check_は_lora_adapter_を_cfg_に反映する(tmp_path, monkeypatch, capsys):
+    novel, cfg_path = _cli_novel(tmp_path)
+    seen = []
+
+    def fake(cfg, out_dir, **kw):
+        seen.append(cfg.lora_adapter)
+        return pipeline.CheckResult(out_dir / "check.tsv", [], 0, 0)
+
+    monkeypatch.setattr(cli, "check_book", fake)
+    cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none", "--lora-adapter", "/x/ad"])
+    cli.main(["check", str(novel), "-c", str(cfg_path), "--voice", "none", "--lora-adapter", "none"])
+    assert seen == ["/x/ad", None]
