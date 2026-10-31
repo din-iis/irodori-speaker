@@ -12,6 +12,7 @@ from .pipeline import (
     BookResult,
     book_dir,
     build_bgm,
+    build_export,
     build_script,
     load_book,
     parse_chapter_range,
@@ -217,6 +218,37 @@ def _run_bgm(args, cfg: Config, out_dir: Path) -> int:
     return 0
 
 
+def _run_export(args, cfg: Config, out_dir: Path) -> int:
+    with tqdm(total=1, desc="書き出し", unit="段階") as bar:
+        last = [0]
+
+        def progress(done: int, total: int, msg: str) -> None:
+            bar.total = total
+            bar.set_description(msg)
+            bar.update(done - last[0])
+            last[0] = done
+
+        try:
+            result = build_export(
+                cfg,
+                out_dir,
+                source="bgm" if args.bgm else "narration",
+                fmt=args.format,
+                bitrate=args.bitrate,
+                progress=progress,
+            )
+        except (RuntimeError, ValueError) as e:
+            print(e)
+            return 1
+    if result.skipped:
+        print("変更なし（前回の書き出しと入力が同じなので、再エンコードしませんでした）")
+    for p in result.chapter_files:
+        print(f"  {p}")
+    size = result.path.stat().st_size / 1_000_000 if result.path.exists() else 0.0
+    print(f"書き出し: {result.path}（{size:.1f} MB）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="irodori_speaker", description="小説を Irodori-TTS で読み上げる")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -254,12 +286,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--llm-model", help="LLM のモデル名（config を上書き）")
     p.add_argument("--think", action="store_true", help="LLM の思考モードを有効にする")
 
+    p = sub.add_parser("export", help="synth 済みの朗読を、章マーカー付き M4B か MP3 に書き出す")
+    p.add_argument("novel", type=Path, help="小説のテキストファイル")
+    p.add_argument("-c", "--config", type=Path, help="設定 YAML")
+    p.add_argument("--format", choices=["m4b", "mp3"], help="書き出す形式（config の export.format を上書き）")
+    p.add_argument("--bitrate", help="ビットレート 例: 64k（config の export.bitrate を上書き）")
+    p.add_argument("--bgm", action="store_true", help="bgm の章 MP3（BGM 付き）から書き出す")
+
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
     out_dir = book_dir(cfg, args.novel)
 
     if args.command == "bgm":
         return _run_bgm(args, cfg, out_dir)
+    if args.command == "export":
+        return _run_export(args, cfg, out_dir)
     if args.command in ("script", "run"):
         rc = _run_script(args, cfg, out_dir)
         if rc != 0:
