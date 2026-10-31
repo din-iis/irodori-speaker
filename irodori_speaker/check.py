@@ -30,6 +30,7 @@ SILENCE_DB = -40.0
 TAIL_MAX_SECONDS = 0.35
 TAIL_GAP_SECONDS = 0.4
 CLIP_LEVEL = 0.99
+SILENT_MAX_SECONDS = 0.1  # 発話がこれ以下の音声は silent
 
 
 @dataclass
@@ -39,6 +40,7 @@ class AudioStats:
     trailing_silence: float
     tail_noise: float
     clipping: int
+    speech_seconds: float | None = None  # 発話フレームの合計秒数（不明なら None）
 
 
 @dataclass
@@ -107,7 +109,7 @@ def analyze_audio(data: np.ndarray, sr: int) -> AudioStats:
     seconds = len(data) / sr
     runs = speech_runs(frame_rms_db(data, sr))
     if not runs:
-        return AudioStats(seconds, seconds, seconds, 0.0, 0)
+        return AudioStats(seconds, seconds, seconds, 0.0, 0, 0.0)
     leading = runs[0][0] * FRAME_SECONDS
     trailing = max(0.0, seconds - runs[-1][1] * FRAME_SECONDS)
     tail = 0.0
@@ -117,7 +119,8 @@ def analyze_audio(data: np.ndarray, sr: int) -> AudioStats:
         if last_len <= TAIL_MAX_SECONDS and gap >= TAIL_GAP_SECONDS - 1e-9:
             tail = last_len
     clipping = int(np.count_nonzero(np.abs(data) >= CLIP_LEVEL))
-    return AudioStats(seconds, leading, trailing, tail, clipping)
+    speech = sum(end - start for start, end in runs) * FRAME_SECONDS
+    return AudioStats(seconds, leading, trailing, tail, clipping, speech)
 
 
 def _read_mono(path: Path) -> tuple[np.ndarray, int]:
@@ -157,6 +160,8 @@ def flags_for(row: CheckRow, z_threshold: float, cer_threshold: float, warned: s
         flags.append("clip")
     if st is not None and st.tail_noise > 0:
         flags.append("tail")
+    if st is not None and row.chars > 0 and st.speech_seconds is not None and st.speech_seconds <= SILENT_MAX_SECONDS:
+        flags.append("silent")
     if st is None:
         flags.append("missing")
     if row.key in warned:

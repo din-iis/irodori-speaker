@@ -317,3 +317,31 @@ def test_transcribe_は音声を全件まとめて読み込まない(tmp_path, m
     monkeypatch.setitem(sys.modules, "transformers", fake)
     check.transcribe(paths, "m", "cpu", batch_size=2)
     assert live["max"] <= 2
+
+
+# ---- silent（発話の無い音声） ----
+
+
+def test_analyze_audio_は発話の秒数を測る():
+    data = np.concatenate([_silence(0.5), _sine(1.0), _silence(0.2)])
+    assert check.analyze_audio(data, SR).speech_seconds == pytest.approx(1.0, abs=0.03)
+    assert check.analyze_audio(_silence(1.0), SR).speech_seconds == 0.0
+
+
+def test_flags_for_は発話の無い音声に_silent_を付ける():
+    silent = _row(stats=_stats(seconds=1.0, speech_seconds=0.0), z=0.0)
+    assert check.flags_for(silent, 3.0, 0.3, set()) == ["silent"]
+    ok = _row(stats=_stats(seconds=1.0, speech_seconds=0.8), z=0.0)
+    assert check.flags_for(ok, 3.0, 0.3, set()) == []
+    # 文字が無い行（絵文字だけ）は対象外
+    assert check.flags_for(_row(stats=_stats(speech_seconds=0.0), chars=0), 3.0, 0.3, set()) == []
+
+
+def test_analyze_file_の無音_WAV_は_silent_になる(tmp_path):
+    p = tmp_path / "s.wav"
+    sf.write(p, _silence(1.0), SR)
+    row = _row(stats=check.analyze_file(p), z=0.0)
+    assert "silent" in check.flags_for(row, 3.0, 0.3, set())
+    q = tmp_path / "v.wav"
+    sf.write(q, _sine(1.0), SR)
+    assert "silent" not in check.flags_for(_row(stats=check.analyze_file(q), z=0.0), 3.0, 0.3, set())

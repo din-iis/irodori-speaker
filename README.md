@@ -320,6 +320,7 @@ LLM も TTS のモデルも使わないので、GPU は要りません（`--asr`
 | `long` / `short` | `z` が `check.z_threshold`（既定 3.0）以上 / 以下。引き延ばし・早口・途切れの疑い |
 | `clip` | 波形が振り切れているサンプルがある |
 | `tail` | 文末に、長い無音を挟んだ短い孤立音がある（余計な息や声が末尾に入った疑い） |
+| `silent` | 本文があるのに、発話がほとんど無い（発話が 0.1 秒以下。無音の音声） |
 | `missing` | 音声のキャッシュが無い（まだ合成していないか、`--voice` / `--checkpoint` が違う） |
 | `warned` | `warnings.log` に記録がある（`max_seconds` での切り詰めなど） |
 | `cer` | `--asr` で、文字誤り率が `check.cer_threshold`（既定 0.3）以上 |

@@ -256,13 +256,13 @@ def test_select_row_は_Engine_の共有_Synthesizer_を書き換えない(monke
     (out / "readings.yaml").write_text("東京: とうきょう\n", encoding="utf-8")
     other_seg, other_warn = tmp_path / "other" / "segments", tmp_path / "other" / "warnings.log"
     shared = types.SimpleNamespace(
-        segments_dir=other_seg, warnings_path=other_warn, readings={"x": "y"}, latent_key="L", lora_key="K",
+        segments_dir=other_seg, warnings_path=other_warn, readings={"x": "y"}, latent_key="L", lora_key=None,
     )
     engine = engines[-1]
     key = engine.key_for(*TTS)
     engine._synth, engine._key = shared, key
     expected = segment_cache_key(
-        engine.cfg_for(key), "東京", "L", readings={"東京": "とうきょう"}, lora_key="K", seed=5
+        engine.cfg_for(key), "東京", "L", readings={"東京": "とうきょう"}, seed=5
     )
     wav = out / "segments" / f"{expected}.wav"
     wav.parent.mkdir(exist_ok=True)
@@ -395,3 +395,64 @@ def test_取り直しは選択を消さない(monkeypatch, tmp_path):
     fns, fake, novel = _retake_setup(monkeypatch, tmp_path, rows)
     outs = list(fns["retake_row"](0, dataframe_rows(rows), rows, None, str(novel), *TTS))
     assert all(len(o) == 4 for o in outs)  # selected_idx を出力に持たない = 選択は State に残る
+
+
+# ---- seed を浮動小数点にしない ----
+
+
+def test_seed_は大きな整数を丸めずに取り込む():
+    from irodori_speaker.webui import parse_seed_cell
+
+    big = "9007199254740993"
+    assert parse_seed_cell(big) == 9007199254740993
+    assert rows_from_dataframe([["0", "0", "0", "", "", "あ", "", big]], [_row(0)])[0]["seed"] == big
+    assert next_seed(big, 42) == 9007199254740994
+
+
+def test_seed_は小数部が_0_の表記だけ受け付ける():
+    from irodori_speaker.webui import parse_seed_cell
+
+    assert parse_seed_cell("43.0") == 43
+    assert parse_seed_cell(43.0) == 43
+    assert parse_seed_cell(" 7 ") == 7
+    assert parse_seed_cell("") == "" and parse_seed_cell(None) == "" and parse_seed_cell(float("nan")) == ""
+    for bad in ("1.5", "abc"):
+        with pytest.raises(ValueError):
+            parse_seed_cell(bad)
+
+
+# ---- LoRA の更新を行選択に反映する ----
+
+
+def test_select_row_は_LoRA_を学習し直したら新しい_lora_key_で引く(monkeypatch, tmp_path):
+    import os
+
+    from irodori_speaker.lora import lora_key, lora_stamp
+    from irodori_speaker.synth import segment_cache_key
+
+    engines = _capture_engine(monkeypatch)
+    fns = _handlers(monkeypatch, tmp_path)
+    rows = [_row(0, "あ")]
+    cfg, novel, out = _book(tmp_path, rows)
+    adapter = tmp_path / "ad"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_bytes(b"{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"W1")
+    engine = engines[-1]
+    key = engine.key_for(*TTS, str(adapter))
+    old_key = lora_key(adapter)
+    shared = types.SimpleNamespace(
+        segments_dir=out / "segments", warnings_path=None, readings=None, latent_key="L",
+        lora_key=old_key, _lora_stamp=lora_stamp(adapter),
+    )
+    engine._synth, engine._key = shared, key
+    (adapter / "adapter_model.safetensors").write_bytes(b"W2-longer")  # 学習し直し
+    new_key = lora_key(adapter)
+    assert new_key != old_key
+    wav = out / "segments" / f"{segment_cache_key(engine.cfg_for(key), 'あ', 'L', lora_key=new_key)}.wav"
+    wav.parent.mkdir(exist_ok=True)
+    sf.write(wav, np.zeros(10, dtype=np.float32), 16000)
+    _i, path, _s = fns["select_row"](dataframe_rows(rows), rows, None, str(novel), *TTS,
+                                     types.SimpleNamespace(index=[0, 0]), lora_adapter=str(adapter))
+    assert path == str(wav)
+    assert shared.lora_key == old_key  # 共有インスタンスには書き込まない

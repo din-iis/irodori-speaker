@@ -12,10 +12,12 @@ import inspect
 import math
 import queue
 import random
+import re
 import shutil
 import threading
 import time
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from . import check
@@ -126,16 +128,33 @@ def rows_from_dataframe(df_rows, original_rows: list[dict]) -> list[dict]:
             {
                 **original,
                 "text": "" if blank else str(text),
-                "seed": "" if _blank(seed) else str(_to_int(seed)),
+                "seed": str(parse_seed_cell(seed)),
             }
         )
     return result
 
 
+def parse_seed_cell(value) -> int | str:
+    """表の seed 列の値。空は ""。整数の文字列はそのまま int にし（float を経由しない）、
+    "43.0" のように小数部が 0 の表記だけ許す。"""
+    if _blank(value):
+        return ""
+    text = str(value).strip()
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    try:
+        number = Decimal(text)
+        if number.is_finite() and number == number.to_integral_value():
+            return int(number)
+    except InvalidOperation:
+        pass
+    raise ValueError(f"seed は整数で指定してください: {text!r}")
+
+
 def next_seed(current, default: int | None) -> int:
     """取り直しの seed。今の seed に 1 を足す。空なら sampling.seed + 1、それも無ければランダム。"""
     if not _blank(current):
-        return _to_int(current) + 1
+        return parse_seed_cell(current) + 1
     return default + 1 if default is not None else random.randrange(2**31)
 
 
@@ -153,6 +172,18 @@ def check_view_rows(rows: list) -> list[list[str]]:
         for r in rows
         if r.flags
     ]
+
+
+def current_lora_key(synth, cfg: Config) -> str | None:
+    """行選択のキー計算用の lora_key。共有 Synthesizer は変えず、アダプタが更新されていれば計算し直す。"""
+    from .lora import lora_key, lora_stamp, resolve_lora_adapter
+
+    path = resolve_lora_adapter(cfg.lora_adapter)
+    if path is None:
+        return None
+    if synth.lora_key and getattr(synth, "_lora_stamp", None) == lora_stamp(path):
+        return synth.lora_key
+    return lora_key(path)
 
 
 def _independent_synth(cfg: Config, out_dir: Path):
@@ -710,7 +741,7 @@ def build_app(cfg: Config):
                 synth = _independent_synth(key_cfg, out_dir)
             wav_key = segment_cache_key(
                 key_cfg, row["text"], synth.latent_key, readings=load_readings(key_cfg, out_dir),
-                lora_key=synth.lora_key, seed=row_seed(row),
+                lora_key=current_lora_key(synth, key_cfg), seed=row_seed(row),
             )
             path = out_dir / "segments" / f"{wav_key}.wav"
         except ValueError as e:
