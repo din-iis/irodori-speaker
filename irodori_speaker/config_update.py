@@ -64,7 +64,9 @@ def _split_top(lines: list[str]) -> list[_Block]:
         if line[0] in " \t":
             if cur is not None:
                 cur.body.extend(gap)
+                cur.body.extend(pending)  # 節の途中のインデントの無いコメントは節の中身として残す
                 cur.body.append(line)
+                pending = []
             gap = []
             continue
         gap = []
@@ -74,8 +76,7 @@ def _split_top(lines: list[str]) -> list[_Block]:
             blocks.append(cur)
             pending = []
         elif s.startswith("#"):
-            cur = None
-            pending.append(line)
+            pending.append(line)  # コメントは節を終わらせない（次がインデントされた行なら節の中身）
         else:
             cur = None
             pending = []
@@ -250,10 +251,16 @@ def update_config_text(
     if tail:
         while out and not out[-1].strip():
             out.pop()
+        doc_end: list[str] = []
+        if out and out[-1].strip() == "...":  # YAML の文書の終わりの印の手前に足す
+            doc_end = [out.pop()]
+            while out and not out[-1].strip():
+                out.pop()
         for blk in tail:
             if out:
                 out.append("")
             out.extend(blk)
+        out.extend(doc_end)
     new_text = nl.join(out) + nl
 
     _, after = _load(new_text, "書き足した結果")

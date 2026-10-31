@@ -364,3 +364,18 @@ def test_CRLF_の設定は既存の行の改行を保ったまま足す(tmp_path
     raw = path.read_bytes().decode("utf-8")
     assert raw.startswith(body)
     assert "\n" not in raw.replace("\r\n", "")
+
+
+def test_例の節の中のインデントの無いコメントの後の子キーも足す():
+    ex = "silence:\n  sentence: 0.25\n# メモ\n  title: 1.0\n"
+    new_text, added, _ = update_config_text("silence:\n  sentence: 0.25\n", ex)
+    assert added == ["silence.title"]
+    assert yaml.safe_load(new_text)["silence"]["title"] == 1.0
+
+
+def test_文書の終わりの印の手前に足す():
+    ex = "device: cuda\nprecision: bf16\n"
+    new_text, added, _ = update_config_text("device: cpu\n...\n", ex)
+    assert added == ["precision"]
+    assert new_text.rstrip().endswith("...")
+    assert yaml.safe_load(new_text) == {"device": "cpu", "precision": "bf16"}
